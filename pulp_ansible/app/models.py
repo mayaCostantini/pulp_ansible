@@ -1,4 +1,5 @@
 from logging import getLogger
+from sigstore._verify import VerificationResult
 
 from django.conf import settings
 from django.db import models
@@ -231,6 +232,143 @@ class CollectionVersionSignature(Content):
         default_related_name = "%(app_label)s_%(model_name)s"
         unique_together = ("pubkey_fingerprint", "signed_collection")
 
+class SigstoreOIDCCredentials(BaseModel):
+    """
+    OIDC credentials used by Sigstore for signing content.
+
+    Fields:
+        sigstore_oidc_identity (models.TextField):
+            A unique identity string corresponding to the OIDC identity present as the SAN in the X509 certificate
+            generated when signing content with Sigstore.
+        sigstore_oidc_client_id (models.CharField):
+            Environment variable containing the OIDC client ID.
+        sigstore_oidc_client_secret (models.CharField):
+            Environment variable containing the OIDC client secret.
+    """
+
+    TYPE = "sigstore_oidc_credentials"
+
+    sigstore_oidc_identity = models.TextField()
+    sigstore_oidc_client_id = models.CharField(max_length=64)
+    sigstore_oidc_client_secret = models.CharField(max_length=64)
+
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
+        unique_together = ("sigstore_oidc_client_id", "sigstore_oidc_client_secret")
+
+class OIDCIdentity(BaseModel):
+    """
+    An OIDC identity used to sign content with Sigstore.
+
+    Fields:
+        identity (models.TextField):
+            A unique identity string corresponding to the OIDC identity present as the SAN in the X509 certificate
+            generated when signing content with Sigstore.
+
+    Relations:
+        sigstore_oidc_credentials (models.ForeignKey):
+            A set of environment variable names referencing a client ID and client secret stored on the Pulp server.
+    """
+    
+    TYPE = "sigstore_oidc_identity"
+
+    identity = models.TextField(db_index=True, unique=True) # There is theoretically no limit to the size of an X509 certificate SAN.
+    sigstore_oidc_credentials = models.ForeignKey(
+        SigstoreOIDCCredentials, on_delete=models.CASCADE, related_name="oidc_identities"
+    )
+
+class SigstoreSigningService(BaseModel):
+    """
+    An object to generate Sigstore signatures for a given file.
+    Distinct from SigningService objects used to sign artifacts using GPG
+    (does not call an external script provided by the user).
+
+    Fields:
+        sigstore_rekor_instance (models.TextField):
+            The URL of the Rekor instance to use for logging signatures.
+            Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified.
+        sigstore_fulcio_instance (models.TextField):
+            The URL of the Fulcio instance to use for getting signing certificates.
+            Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified.
+
+    Relations:
+        sigstore_oidc_identity (models.ForeignKey):
+            An OIDC identity associated with an authorized signer.
+            This identity is associated with a unique pair of OIDC credentials stored on the Pulp server.
+    """
+
+    sigstore_rekor_instance = models.TextField(default="https://rekor.sigstore.dev")
+    sigstore_fulcio_instance = models.TextField(default="https://fulcio.sigstore.dev")
+    sigstore_oidc_identity = models.ForeignKey(
+        OIDCIdentity, on_delete=models.CASCADE, related_name="sigstore_signing_service"
+    )
+
+    async def sigstore_asign(self, input, identity_token):
+        """Sign collections with Sigstore asynchronously."""
+        pass
+    
+
+class SigstoreVerifyingService(BaseModel):
+    """
+    An object to verify a Sigstore signature against a Rekor instance.
+    Handles Sigstore verification policies specified when uploading signed content.
+
+    Fields:
+        sigstore_rekor_instance (models.TextField):
+            The URL of the Rekor instance to use for verifying signature entries.
+            Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified.
+        sigstore_verification_policies (models.TextField):
+            A list of Sigstore verification policies.
+    """
+
+    sigstore_rekor_instance = models.TextField(default="https://rekor.sigstore.dev")
+    sigstore_verification_policies = models.TextField(default=None)
+
+    def sigstore_verify(artifact_bytes, x509_certificate):
+        # TODO: implement verifying logic with verification policies.
+        # Placeholder
+        return VerificationSuccess
+
+class CollectionVersionSigstoreSignature(Content):
+    """
+    A content type representing a Sigstore signature attached to a content unit.
+
+    Fields:
+        data (models.BinaryField):
+            A signature, base64 encoded.
+        digest (models.CharField):
+            A signature sha256 digest.
+        sigstore_x509_certificate (models.BinaryField):
+            The ephemeral PEM-encoded signing certificate generated by Sigstore.
+        sigstore_x509_certificate_sha256_digest (models.CharField):
+            X509 signing certificate digest.
+        sigstore_oidc_identity (models.TextField):
+            The OIDC identity present in the signing certificate.
+
+    Relations:
+        signed_collection (models.ForeignKey):
+            A collection version this signature is relevant to.
+        sigstore_signing_service (models.ForeignKey):
+            The Sigstore Siging Service used for signing the collection version.
+    """
+
+    TYPE = "collection_sigstore_signature"
+
+    signed_collection = models.ForeignKey(
+        CollectionVersion, on_delete=models.CASCADE, related_name="sigstore_signatures"
+    )
+    data = models.BinaryField()
+    digest = models.CharField(max_length=64)
+    sigstore_signing_service = models.ForeignKey(
+        SigstoreSigningService, on_delete=models.CASCADE, related_name="sigstore_signatures"
+    )
+    sigstore_x509_certificate = models.BinaryField()
+    sigstore_x509_certificate_sha256_digest = models.CharField(max_length=64)
+    sigstore_oidc_identity = models.TextField()
+
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
+        unique_together = ("sigstore_x509_certificate_sha256_digest", "signed_collection")
 
 class DownloadLog(BaseModel):
     """
@@ -360,11 +498,13 @@ class AnsibleRepository(Repository):
         CollectionVersion,
         AnsibleCollectionDeprecated,
         CollectionVersionSignature,
+        CollectionVersionSigstoreSignature,
     ]
     REMOTE_TYPES = [RoleRemote, CollectionRemote]
 
     last_synced_metadata_time = models.DateTimeField(null=True)
     gpgkey = models.TextField(null=True)
+    sigstore_rekor_instance = models.TextField(null=True)
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"
@@ -385,7 +525,11 @@ class AnsibleRepository(Repository):
             signatures = new_version.get_content(
                 content_qs=CollectionVersionSignature.objects.filter(signed_collection=version)
             )
+            sigstore_signatures = new_version.get_content(
+                content_qs=CollectionVersionSigstoreSignature.objects.filter(signed_collection=version)
+            )
             new_version.remove_content(signatures)
+            new_version.remove_content(sigstore_signatures)
 
             other_collection_versions = new_version.get_content(
                 content_qs=CollectionVersion.objects.filter(collection=version.collection)

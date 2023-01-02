@@ -39,6 +39,7 @@ from .models import (
     Collection,
     CollectionVersion,
     CollectionVersionSignature,
+    CollectionVersionSigstoreSignature,
     CollectionRemote,
     Role,
     Tag,
@@ -51,9 +52,11 @@ from .serializers import (
     AnsibleRepositorySyncURLSerializer,
     AnsibleRepositoryRebuildSerializer,
     AnsibleRepositorySignatureSerializer,
+    AnsibleRepositorySigstoreSignatureSerializer,
     CollectionSerializer,
     CollectionVersionSerializer,
     CollectionVersionSignatureSerializer,
+    CollectionVersionSigstoreSignatureSerializer,
     CollectionRemoteSerializer,
     CollectionOneShotSerializer,
     CopySerializer,
@@ -65,7 +68,7 @@ from .tasks.collections import rebuild_repository_collection_versions_metadata
 from .tasks.copy import copy_content
 from .tasks.roles import synchronize as role_sync
 from .tasks.git import synchronize as git_sync
-from .tasks.signature import sign
+from .tasks.signature import sign, sigstore_sign
 
 
 class RoleFilter(ContentFilter):
@@ -207,6 +210,31 @@ class SignatureFilter(ContentFilter):
             "signing_service": ["exact"],
         }
 
+class SigstoreSignatureFilter(ContentFilter):
+    """
+    A filter for Sigstore signatures.
+    """
+
+    signed_collection = HyperlinkRelatedFilter(
+        field_name="signed_collection",
+        help_text=_("Filter signatures for collection version")
+    )
+    sigstore_x509_certificate_sha256_digest = HyperlinkRelatedFilter(
+        field_name="x509_certificate_sha256_digest",
+        help_text=_("Filter Sigstore signatures by X509 signing certificate sha 256 digest")
+    )
+    sigstore_signing_service = HyperlinkRelatedFilter(
+        field_name="sigstore_signing_service",
+        help_text=_("Filter Sigstore signatures produced by Sigstore Signing Service"),
+    )
+
+    class Meta:
+        model = CollectionVersionSigstoreSignature
+        fields = {
+            "signed_collection": ["exact"],
+            "sigstore_x509_certificate_sha256_digest": ["exact", "in"],
+            "sigstore_signing_service": ["exact"]
+        }
 
 class CollectionVersionSignatureViewSet(NoArtifactContentUploadViewSet):
     """
@@ -218,6 +246,15 @@ class CollectionVersionSignatureViewSet(NoArtifactContentUploadViewSet):
     queryset = CollectionVersionSignature.objects.all()
     serializer_class = CollectionVersionSignatureSerializer
 
+class CollectionVersionSigstoreSignatureViewSet(NoArtifactContentUploadViewSet):
+    """
+    ViewSet for looking at Sigstore signature objects for CollectionVersion content.
+    """
+
+    enpoint_name = "collection_sigstore_signatures"
+    filterset_class = SigstoreSignatureFilter
+    queryset = CollectionVersionSigstoreSignature.objects.all()
+    serializer_class = CollectionVersionSigstoreSignatureSerializer
 
 class CollectionDeprecatedViewSet(ContentViewSet):
     """
@@ -332,7 +369,7 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
     @action(detail=True, methods=["post"], serializer_class=AnsibleRepositorySignatureSerializer)
     def sign(self, request, pk):
         """
-        Dispatches a sync task.
+        Dispatches a signing task.
 
         This endpoint is in tech preview and can change at any time in the future.
         """
@@ -361,6 +398,46 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
                 "repository_href": repository.pk,
                 "content_hrefs": content_units_pks,
                 "signing_service_href": signing_service.pk,
+            },
+        )
+        return OperationPostponedResponse(result, request)
+
+    @extend_schema(
+        description="Trigger an asynchronous task to sign Ansible content with Sigstore.",
+        responses={202: AsyncOperationResponseSerializer},
+    )
+    @action(detail=True, methods=["post"], serializer_class=AnsibleRepositorySigstoreSignatureSerializer)
+    def sigstore_sign(self, request, pk):
+        """
+        Dispatches a signing task.
+
+        This endpoint is in tech preview and can change at any time in the future.
+        """
+        content_units = {}
+
+        repository = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        sigstore_signing_service = serializer.validated_data["sigstore_signing_service"]
+        content = serializer.validated_data["content_units"]
+
+        if "*" in content:
+            content_units_pks = ["*"]
+        else:
+            for url in content:
+                content_units[NamedModelViewSet.extract_pk(url)] = url
+            content_units_pks = list(content_units.keys())
+            existing_content_units = CollectionVersion.objects.filter(pk__in=content_units_pks)
+            raise_for_unknown_content_units(existing_content_units, content_units)
+
+        result = dispatch(
+            sigstore_sign,
+            exclusive_resources=[repository],
+            kwargs={
+                "repository_href": repository.pk,
+                "content_hrefs": content_units_pks,
+                "sigstore_signing_service_href": sigstore_signing_service.pk,
             },
         )
         return OperationPostponedResponse(result, request)
