@@ -241,12 +241,12 @@ class CollectionSigstoreSigningFirstStage(Stage):
     and creates CollectionVersionSigstoreSignatures.
     """
 
-    def __init__(self, content, sigstore_signing_service, current_signatures):
+    def __init__(self, content, sigstore_signing_service, current_sigstore_signatures):
         """Initialize Sigstore signing first stage."""
         super().__init__()
         self.content = content
         self.sigstore_signing_service = sigstore_signing_service
-        self.repos_current_signatures = current_signatures
+        self.repos_current_sigstore_signatures = current_sigstore_signatures
         self.semaphore = asyncio.Semaphore(settings.ANSIBLE_SIGNING_TASK_LIMITER)
 
     async def sigstore_sign_collection_version(self, collection_version):
@@ -272,17 +272,44 @@ class CollectionSigstoreSigningFirstStage(Stage):
                 sig_data = await sig.read()
             async with aiofiles.open(result["sigstore_x509_certificate"], "rb") as cert:
                 cert_data = await cert.read()
-            sigstore_verifying_service = SigstoreVerifyingService(
-                rekor_instance=self.sigstore_signing_service.rekor_instance,
-                x509_certificate=cert_data
-            )
+
             cv_signature = CollectionVersionSigstoreSignature(
                 data=data.decode(),
                 digest=hashlib.sha256(data).hexdigest(),
                 signed_collection=collection_version,
-                oidc_identity=self.sigstore_signing_service.oidc_identity,
-                signing_service=self.sigstore_signing_service,
+                sigstore_x509_certificate=cert_data,
+                sigstore_x509_certificate_sha256_digest=hashlib.sha256(cert_data).hexdigest(),
+                sigstore_signing_service=self.sigstore_signing_service,
             )
             dc = DeclarativeContent(content=cv_signature)
             await self.progress_report.aincrement()
             await self.put(dc)
+
+    async def run(self):
+        """Sign collections with Sigstore if they have not been signed."""
+        # TODO: Replace this signing logic by checking for a signature holding 
+        # a specific OIDC identity, compliant to new verification policy, etc.
+        # Need to add corresponding field to the CollectionVersionSigstoreSignature model.
+        tasks = []
+        # Temporary: filter out any content that has not been signed with Sigstore.
+        current_signatures = CollectionVersionSigstoreSignature.objects.exclude(
+        sigstore_x509_certificate_sha256_digest=None
+        )
+        new_content = self.content.exclude(signatures__in=current_signatures)
+        ntotal = await sync_to_async(new_content.count)()
+        nmsg = _("Signing new CollectionVersions with Sigstore.")
+        async with ProgressReport(message=msg, code="sign.new.signature", total=ntotal) as p:
+            self.progress_report = p
+            async for collection_version in sync_to_async_iterable(new_content.iterator()):
+                tasks.append(asyncio.create_task(self.sigstore_sign_collection_version(collection_version)))
+            await asyncio.gather(*tasks)
+
+        present_content = current_signatures.filter(signed_collection__in=self.content).exclude(
+            pk__in=self.repos_current_sigstore_signatures
+        )
+        ptotal = await sync_to_async(present_content.count())
+        pmsg = _("Adding present CollectionVersionSigstoreSignatures")
+        async with ProgressReport(message=pmsg, code="sign.present.signature", total=ptotal) as np:
+            async for sigstore_signature in sync_to_async_iterable(present_content.iterator()):
+                await np.aincrement()
+                await self.put(DeclarativeContent(content=sigstore_signature))
