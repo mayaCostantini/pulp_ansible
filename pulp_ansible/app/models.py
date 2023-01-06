@@ -281,7 +281,7 @@ class SigstoreSigningService(BaseModel):
     """
     An object to generate Sigstore signatures for a given file.
     Distinct from SigningService objects used to sign artifacts using GPG
-    (does not call an external script provided by the user).
+    (does not call an external script provided by the user, but still needs to be registered).
 
     Fields:
         sigstore_rekor_instance (models.TextField):
@@ -297,16 +297,48 @@ class SigstoreSigningService(BaseModel):
             This identity is associated with a unique pair of OIDC credentials stored on the Pulp server.
     """
 
+    name = models.TextField(db_index=True, unique=True)
     sigstore_rekor_instance = models.TextField(default="https://rekor.sigstore.dev")
     sigstore_fulcio_instance = models.TextField(default="https://fulcio.sigstore.dev")
     sigstore_oidc_identity = models.ForeignKey(
         OIDCIdentity, on_delete=models.CASCADE, related_name="sigstore_signing_service"
     )
 
+    def sigstore_sign(self, input, identity_token):
+        """Sign collections with Sigstore."""
+        pass 
+
     async def sigstore_asign(self, input, identity_token):
         """Sign collections with Sigstore asynchronously."""
         pass
+
+    def validate(self):
+        """Ensure that the SigstoreSigningService created provides the desired behavior."""
+        pass
+
+    def save(self, *args, **kwargs):
+        """
+        Save a Sigstore signing service to the database (unless it fails to validate).
+        """
+        if not self.sigstore_oidc_identity:
+            raise RuntimeError(
+                _(
+                    "The OIDC identity of the signer (e.g., email) must be specified to create a "
+                    "Sigstore signing service instance."
+                )
+            )
+
+        self.validate()
+        super().save(*args, **kwargs)
     
+    @hook(BEFORE_UPDATE)
+    def on_update(self):
+        raise RuntimeError(
+            _(
+                "The Sigstore signing service is immutable. It is advised to create a new Sigstore signing service "
+                "when a change is required."
+            )
+        )
 
 class SigstoreVerifyingService(BaseModel):
     """
@@ -502,7 +534,7 @@ class AnsibleRepository(Repository):
     last_synced_metadata_time = models.DateTimeField(null=True)
     gpgkey = models.TextField(null=True)
     sigstore_verifying_service = models.ForeignKey(
-        SigstoreVerifyingService, on_delete=models.CASCADE, related_name="ansible_repositories"
+        SigstoreVerifyingService, on_delete=models.CASCADE, related_name="ansible_repositories", null=True
     )
 
     class Meta:

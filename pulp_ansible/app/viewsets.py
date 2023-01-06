@@ -42,6 +42,7 @@ from .models import (
     CollectionVersionSigstoreSignature,
     CollectionRemote,
     Role,
+    SigstoreSigningService,
     Tag,
 )
 from .serializers import (
@@ -61,6 +62,7 @@ from .serializers import (
     CollectionOneShotSerializer,
     CopySerializer,
     RoleSerializer,
+    SigstoreSigningServiceSerializer,
     TagSerializer,
 )
 from .tasks.collections import sync as collection_sync
@@ -236,6 +238,14 @@ class SigstoreSignatureFilter(ContentFilter):
             "sigstore_signing_service": ["exact"]
         }
 
+class SigstoreSigningServiceViewSet(NamedModelViewSet, mixins.RetrieveModelMixin, mixins.ListModelMixin):
+    """Viewset for looking at Sigstore signing services."""
+
+    endpoint_name = "sigstore_signing_services"
+    queryset = SigstoreSigningService.objects.all()
+    serializer_class = SigstoreSigningServiceSerializer
+    filterset_fields = ["name"]
+
 class CollectionVersionSignatureViewSet(NoArtifactContentUploadViewSet):
     """
     ViewSet for looking at signature objects for CollectionVersion content.
@@ -409,7 +419,7 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
     @action(detail=True, methods=["post"], serializer_class=AnsibleRepositorySigstoreSignatureSerializer)
     def sigstore_sign(self, request, pk):
         """
-        Dispatches a signing task.
+        Dispatches a Sigstore signing task.
 
         This endpoint is in tech preview and can change at any time in the future.
         """

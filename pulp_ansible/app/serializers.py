@@ -4,6 +4,8 @@ from django.conf import settings
 from jsonschema import Draft7Validator
 from rest_framework import serializers
 
+from pulpcore.app.serializers import base
+from pulpcore.app.serializers.content import BaseContentSerializer
 from pulpcore.plugin.models import Artifact, SigningService
 from pulpcore.plugin.serializers import (
     DetailRelatedField,
@@ -33,6 +35,7 @@ from .models import (
     CollectionVersionSignature,
     CollectionVersionSigstoreSignature,
     CollectionRemote,
+    OIDCIdentity,
     Role,
     SigstoreSigningService,
     Tag,
@@ -740,6 +743,30 @@ class CollectionVersionSignatureSerializer(NoArtifactContentUploadSerializer):
             "signed_collection",
             "pubkey_fingerprint",
             "signing_service",
+        )
+
+class SigstoreSigningServiceSerializer(base.ModelSerializer):
+    """
+    A serializer for Sigstore signing services.
+    """
+
+    pulp_href = base.IdentityField(view_name="sigstore-signing-services-detail")
+    name = serializers.CharField(help_text=_("A unique name used to recognize a Sigstore signing service."))
+    sigstore_rekor_instance = serializers.CharField(default="https://rekor.sigstore.dev", allow_null=True)
+    sigstore_fulcio_instance = serializers.CharField(default="https://fulcio.sigstore.dev", allow_null=True)
+    sigstore_oidc_identity = RelatedField(
+        help_text=_("The OIDC identity used to generate the Sigstore signature."),
+        view_name="oidc-identities-detail",
+        queryset=OIDCIdentity.objects.all()
+    )
+
+    class Meta:
+        model = SigstoreSigningService
+        fields = BaseContentSerializer.Meta.fields + (
+            "name",
+            "sigstore_rekor_instance",
+            "sigstore_fulcio_instance",
+            "sigstore_oidc_identity",
         )
 
 class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerializer):
