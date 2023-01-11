@@ -2,7 +2,7 @@ from gettext import gettext as _
 
 from django.conf import settings
 from jsonschema import Draft7Validator
-from rest_framework import serializers
+from rest_framework import serializers, fields
 
 from pulpcore.app.serializers import base
 from pulpcore.app.serializers.content import BaseContentSerializer
@@ -136,9 +136,9 @@ class AnsibleRepositorySerializer(RepositorySerializer):
         required=False,
         allow_null=True,
     )
-    sigstore_verifying_service = RelatedField(
-        help_text=_("The Sigstore verifying service used to verify the signature with specified verification policies."),
-        view_name="sigstore-verifying-services-detail",
+    sigstore_signing_service = DetailRelatedField(
+        help_text=_("The Sigstore signing service used to verify the signature with specified verification policies."),
+        view_name="sigstore-signing-services-detail",
         read_only=True,
         allow_null=True,
     )
@@ -146,7 +146,7 @@ class AnsibleRepositorySerializer(RepositorySerializer):
         fields = RepositorySerializer.Meta.fields + (
             "last_synced_metadata_time",
             "gpgkey",
-            "sigstore_verifying_service",
+            "sigstore_signing_service",
         )
         model = AnsibleRepository
 
@@ -745,27 +745,49 @@ class CollectionVersionSignatureSerializer(NoArtifactContentUploadSerializer):
             "signing_service",
         )
 
-class SigstoreSigningServiceSerializer(base.ModelSerializer):
+class OIDCIdentitySerializer(NoArtifactContentUploadSerializer):
+    """
+    A serializer for OIDC identities used with Sigstore.
+    """
+
+    identity = serializers.CharField(help_text=_("A unique identity string corresponding to the OIDC identity present as the SAN in the X509 certificate"))
+    oidc_client_id = serializers.CharField(help_text=_("Environment variable containing the OIDC client ID."))
+    oidc_client_secret = serializers.CharField(help_text=_("Environment variable containing the OIDC client secret."))
+
+    class Meta:
+        model = OIDCIdentity
+        fields = NoArtifactContentUploadSerializer.Meta.fields + (
+            "identity",
+            "oidc_client_id",
+            "oidc_client_secret",
+        )
+
+class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     """
     A serializer for Sigstore signing services.
     """
 
-    pulp_href = base.IdentityField(view_name="sigstore-signing-services-detail")
     name = serializers.CharField(help_text=_("A unique name used to recognize a Sigstore signing service."))
     sigstore_rekor_instance = serializers.CharField(default="https://rekor.sigstore.dev", allow_null=True)
     sigstore_fulcio_instance = serializers.CharField(default="https://fulcio.sigstore.dev", allow_null=True)
-    sigstore_oidc_identity = RelatedField(
+    sigstore_verification_policies = serializers.ListField(child=serializers.CharField())
+    sigstore_verification_policies_all_or_any = serializers.CharField(
+        help_text=_("Choose to apply all of or any of the provided Sigstore verification policies.")
+    )
+    sigstore_oidc_identity = DetailRelatedField(
         help_text=_("The OIDC identity used to generate the Sigstore signature."),
-        view_name="oidc-identities-detail",
-        queryset=OIDCIdentity.objects.all()
+        read_only=True,
+        view_name="sigstore-oidc-identity"
     )
 
     class Meta:
         model = SigstoreSigningService
-        fields = BaseContentSerializer.Meta.fields + (
+        fields = NoArtifactContentUploadSerializer.Meta.fields + (
             "name",
             "sigstore_rekor_instance",
             "sigstore_fulcio_instance",
+            "sigstore_verification_policies",
+            "sigstore_verification_policies_all_or_any",
             "sigstore_oidc_identity",
         )
 
@@ -861,7 +883,7 @@ class AnsibleRepositorySigstoreSignatureSerializer(serializers.Serializer):
     )
     sigstore_siging_service = RelatedField(
         required=True,
-        view_name="sigstore-signing-service",
+        view_name="sigstore-signing-services-detail",
         queryset=SigstoreSigningService.objects.all(),
         help_text=_("A signing service used to sign collections with Sigstore."),
     )

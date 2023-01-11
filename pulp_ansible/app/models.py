@@ -232,31 +232,8 @@ class CollectionVersionSignature(Content):
         default_related_name = "%(app_label)s_%(model_name)s"
         unique_together = ("pubkey_fingerprint", "signed_collection")
 
-class SigstoreOIDCCredentials(BaseModel):
-    """
-    OIDC credentials used by Sigstore for signing content.
 
-    Fields:
-        sigstore_oidc_identity (models.TextField):
-            A unique identity string corresponding to the OIDC identity present as the SAN in the X509 certificate
-            generated when signing content with Sigstore.
-        sigstore_oidc_client_id (models.CharField):
-            Environment variable containing the OIDC client ID.
-        sigstore_oidc_client_secret (models.CharField):
-            Environment variable containing the OIDC client secret.
-    """
-
-    TYPE = "sigstore_oidc_credentials"
-
-    sigstore_oidc_identity = models.TextField()
-    sigstore_oidc_client_id = models.CharField(max_length=64)
-    sigstore_oidc_client_secret = models.CharField(max_length=64)
-
-    class Meta:
-        default_related_name = "%(app_label)s_%(model_name)s"
-        unique_together = ("sigstore_oidc_client_id", "sigstore_oidc_client_secret")
-
-class OIDCIdentity(BaseModel):
+class OIDCIdentity(Content):
     """
     An OIDC identity used to sign content with Sigstore.
 
@@ -264,20 +241,24 @@ class OIDCIdentity(BaseModel):
         identity (models.TextField):
             A unique identity string corresponding to the OIDC identity present as the SAN in the X509 certificate
             generated when signing content with Sigstore.
-
-    Relations:
-        sigstore_oidc_credentials (models.ForeignKey):
-            A set of environment variable names referencing a client ID and client secret stored on the Pulp server.
+        oidc_client_id (models.CharField):
+            Environment variable containing the OIDC client ID.
+        oidc_client_secret (models.CharField):
+            Environment variable containing the OIDC client secret.
     """
     
     TYPE = "sigstore_oidc_identity"
 
     identity = models.TextField(db_index=True, unique=True) # There is theoretically no limit to the size of an X509 certificate SAN.
-    sigstore_oidc_credentials = models.ForeignKey(
-        SigstoreOIDCCredentials, on_delete=models.CASCADE, related_name="oidc_identities"
-    )
+    oidc_client_id = models.CharField(max_length=64)
+    oidc_client_secret = models.CharField(max_length=64)
 
-class SigstoreSigningService(BaseModel):
+
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
+        unique_together = ("oidc_client_id", "oidc_client_secret")
+
+class SigstoreSigningService(Content):
     """
     An object to generate Sigstore signatures for a given file.
     Distinct from SigningService objects used to sign artifacts using GPG
@@ -290,6 +271,10 @@ class SigstoreSigningService(BaseModel):
         sigstore_fulcio_instance (models.TextField):
             The URL of the Fulcio instance to use for getting signing certificates.
             Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified.
+        sigstore_verification_policies (psql_fields.ArrayField):
+            A list of Sigstore verification policies.
+        sigstore_verification_policies_all_or_any (models.CharField):
+            Choose AllOf or AnyOf the provided verification policies.
 
     Relations:
         sigstore_oidc_identity (models.ForeignKey):
@@ -297,9 +282,28 @@ class SigstoreSigningService(BaseModel):
             This identity is associated with a unique pair of OIDC credentials stored on the Pulp server.
     """
 
+    TYPE = "sigstore_signing_services"
+
+    # GitHub verification policies are ignored 
+    VERIFYING_POLICIES = [
+        ('OIDCIssuer', 'oidc_issuer'),
+        ('Identity', 'identity')
+    ]
+
     name = models.TextField(db_index=True, unique=True)
     sigstore_rekor_instance = models.TextField(default="https://rekor.sigstore.dev")
     sigstore_fulcio_instance = models.TextField(default="https://fulcio.sigstore.dev")
+    sigstore_verification_policies = psql_fields.ArrayField(
+        models.CharField(choices=VERIFYING_POLICIES, blank=True, max_length=10),
+        blank=True,
+        null=True,
+    )
+    sigstore_verification_policies_all_or_any = models.CharField(
+        choices=[('AllOf', 'all_of'), ('AnyOf', 'any_of')],
+        max_length=5,
+        blank=True,
+        null=True,
+    )
     sigstore_oidc_identity = models.ForeignKey(
         OIDCIdentity, on_delete=models.CASCADE, related_name="sigstore_signing_service"
     )
@@ -312,9 +316,17 @@ class SigstoreSigningService(BaseModel):
         """Sign collections with Sigstore asynchronously."""
         pass
 
+    def sigstore_verify(artifact_bytes, x509_certificate):
+        # TODO: implement verifying logic with verification policies.
+        # Placeholder
+        return VerificationSuccess
+
     def validate(self):
         """Ensure that the SigstoreSigningService created provides the desired behavior."""
-        pass
+        if self.sigstore_verification_policies is None and self.sigstore_verification_policies_all_or_any is not None:
+            raise ValidationError(
+                _("Cannot choose between all of or any of Sigstore verification policies because none were provided.")
+            )
 
     def save(self, *args, **kwargs):
         """
@@ -340,26 +352,8 @@ class SigstoreSigningService(BaseModel):
             )
         )
 
-class SigstoreVerifyingService(BaseModel):
-    """
-    An object to verify a Sigstore signature against a Rekor instance.
-    Handles Sigstore verification policies specified when uploading signed content.
-
-    Fields:
-        sigstore_rekor_instance (models.TextField):
-            The URL of the Rekor instance to use for verifying signature entries.
-            Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified.
-        sigstore_verification_policies (models.TextField):
-            A list of Sigstore verification policies.
-    """
-
-    sigstore_rekor_instance = models.TextField(default="https://rekor.sigstore.dev")
-    sigstore_verification_policies = models.TextField(default=None)
-
-    def sigstore_verify(artifact_bytes, x509_certificate):
-        # TODO: implement verifying logic with verification policies.
-        # Placeholder
-        return VerificationSuccess
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
 
 class CollectionVersionSigstoreSignature(Content):
     """
@@ -390,7 +384,7 @@ class CollectionVersionSigstoreSignature(Content):
     data = models.BinaryField()
     digest = models.CharField(max_length=64)
     sigstore_signing_service = models.ForeignKey(
-        SigstoreSigningService, on_delete=models.CASCADE, related_name="sigstore_signatures"
+        SigstoreSigningService, on_delete=models.SET_NULL, related_name="sigstore_signatures", null=True
     )
     sigstore_x509_certificate = models.BinaryField()
     sigstore_x509_certificate_sha256_digest = models.CharField(max_length=64)
@@ -533,8 +527,8 @@ class AnsibleRepository(Repository):
 
     last_synced_metadata_time = models.DateTimeField(null=True)
     gpgkey = models.TextField(null=True)
-    sigstore_verifying_service = models.ForeignKey(
-        SigstoreVerifyingService, on_delete=models.CASCADE, related_name="ansible_repositories", null=True
+    sigstore_signing_service = models.ForeignKey(
+        SigstoreSigningService, on_delete=models.CASCADE, related_name="ansible_repositories", null=True
     )
 
     class Meta:

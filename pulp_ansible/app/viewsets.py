@@ -41,6 +41,7 @@ from .models import (
     CollectionVersionSignature,
     CollectionVersionSigstoreSignature,
     CollectionRemote,
+    OIDCIdentity,
     Role,
     SigstoreSigningService,
     Tag,
@@ -61,6 +62,7 @@ from .serializers import (
     CollectionRemoteSerializer,
     CollectionOneShotSerializer,
     CopySerializer,
+    OIDCIdentitySerializer,
     RoleSerializer,
     SigstoreSigningServiceSerializer,
     TagSerializer,
@@ -238,8 +240,20 @@ class SigstoreSignatureFilter(ContentFilter):
             "sigstore_signing_service": ["exact"]
         }
 
-class SigstoreSigningServiceViewSet(NamedModelViewSet, mixins.RetrieveModelMixin, mixins.ListModelMixin):
-    """Viewset for looking at Sigstore signing services."""
+class OIDCIdentityViewSet(NoArtifactContentUploadViewSet):
+    """
+    ViewSet for looking at Sigstore registered OIDC identities.
+    """
+
+    endpoint_name = "sigstore_oidc_identities"
+    queryset = OIDCIdentity.objects.all()
+    serializer_class = OIDCIdentitySerializer
+    filterset_fields = ["identity"]
+
+class SigstoreSigningServiceViewSet(NoArtifactContentUploadViewSet):
+    """
+    Viewset for looking at Sigstore signing services.
+    """
 
     endpoint_name = "sigstore_signing_services"
     queryset = SigstoreSigningService.objects.all()
