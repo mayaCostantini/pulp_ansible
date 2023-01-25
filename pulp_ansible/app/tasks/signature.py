@@ -5,7 +5,9 @@ import logging
 import tarfile
 import tempfile
 from gettext import gettext as _
-from sigstore._verify import VerificationFailure, VerificationSuccess
+
+from sigstore._verify.models import VerificationFailure, VerificationSuccess
+from sigstore._internal.rekor.client import RekorBundle
 
 from pulpcore.plugin.stages import (
     ContentSaver,
@@ -19,9 +21,7 @@ from pulp_ansible.app.models import (
     CollectionVersion,
     CollectionVersionSignature,
     CollectionVersionSigstoreSignature,
-    OIDCIdentity,
     SigstoreSigningService,
-    SigstoreVerifyingService,
 )
 
 from django.conf import settings
@@ -31,8 +31,14 @@ from pulpcore.plugin.sync import sync_to_async_iterable, sync_to_async
 from pulpcore.plugin.util import gpg_verify
 from pulpcore.plugin.exceptions import InvalidSignatureError
 from pulp_ansible.app.tasks.utils import get_file_obj_from_tarball
+from pulp_ansible.app.sigstoreutils import MissingSigstoreVerificationMaterialsException, VerificationFailureException
 from rest_framework import serializers
 
+import base64
+from cryptography.x509 import load_pem_x509_certificate
+from cryptography.hazmat.primitives.serialization import Encoding
+from sigstore._verify.verifier import VerificationMaterials
+from pulp_ansible.app.sigstoreutils import get_verifier, get_verification_policy
 
 log = logging.getLogger(__name__)
 
@@ -78,40 +84,38 @@ def verify_signature_upload(data):
 
 def verify_sigstore_signature_upload(data):
     """The task code for verifying Sigstore signature upload."""
-    # Temporary placeholder for verifying the serializers first.
-    # Should verify that the signature validity and the presence of verification materials.
-    file = data["file"]
-    sig_data = file.read().decode()
-    file.seek(0)
     collection = data["signed_collection"]
     repository = data.get("repository")
-    sigstore_verifying_service = repository.sigstore_verifying_service or None
-    # Same logic as above using sigstore_verifying_service x509_certificate and rekor_instance to validate the signature.
+    sigstore_signing_service = repository and repository.sigstore_signing_service
     artifact = collection.contentartifact_set.select_related("artifact").first().artifact.file.name
     artifact_file = storage.open(artifact)
     with tarfile.open(fileobj=artifact_file, mode="r") as tar:
-        manifest = get_file_obj_from_tarball(tar, "MANIFEST.json", artifact_file)
-        manifest_certificate = get_obj_from_tarball(tar, "MANIFEST.json.crt", artifact_file)
-        try:
-            verification_result = sigstore_verifying_service.sigstore_verify(file, manifest_certificate)
-        except VerificationFailure as e:
-            if sigstore_verifying_service:
-                raise serializers.ValidationError(
-                    _("Sigstore signature verification failed: {}").format(e)
-                )
-            elif settings.ANSIBLE_SIGNATURE_REQUIRE_VERIFICATION:
-                raise serializers.ValidationError(
-                    _("Sigstore signature verification failed: No Sigstore verifying service was configured.")
-                )
-            else:
-                # We have no Sigstore verifying service configured. So we simply accept the signature as is
-                log.warn(
-                    "Collection Sigstore signature was accepted without verification. No Sigstore verifying service available."
-                )
+        sha256sumfile = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt", artifact_file)
+        sha256sumsig = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.sig", artifact_file)
+        sha256sumcert = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.crt", artifact_file)
+        offline_rekor_entry = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.rekor", artifact_file)
+        missing = []
+        for verification_artifact in [sha256sumfile, sha256sumsig, sha256sumcert]:
+            if verification_artifact is None:
+                missing.append(verification_artifact)
+        if missing:
+            raise MissingSigstoreVerificationMaterialsException(f"Missing {missing} for Sigstore signature verification")
+        
+        bundle = RekorBundle.parse_raw(offline_rekor_entry.read().decode())
+        entry = bundle.to_entry()
 
-    data["data"] = sig_data
-    data["digest"] = file.hashers["sha256"].hexdigest()
-    data["sigstore_x509_certificate"] = manifest_certificate
+        verification_result = sigstore_signing_service.sigstore_verify(
+            sha256sumfile=sha256sumfile,
+            sha256sumcert=sha256sumcert.read().decode(),
+            sha256sumsig=base64.b64encode(sha256sumsig.read()),
+            offline_rekor_entry=entry
+        )
+
+        if isinstance(VerificationFailure, verification_result):
+            raise VerificationFailureException(f"Failed to verify Sigstore signature for collection {collection}")
+
+        print(f"Validated Sigstore signature for collection {collection}")
+        
     return data
 
 def sign(repository_href, content_hrefs, signing_service_href):
@@ -132,7 +136,7 @@ def sign(repository_href, content_hrefs, signing_service_href):
     first_stage = CollectionSigningFirstStage(content, signing_service, repos_current_signatures)
     SigningDeclarativeVersion(first_stage, repository).create()
 
-def sigstore_sign(repository_href, content_href, sigstore_signing_service_href):
+def sigstore_sign(repository_href, content_hrefs):
     """Signing task for Sigstore."""
     repository = AnsibleRepository.objects.get(pk=repository_href)
     if content_hrefs == ["*"]:

@@ -1,11 +1,11 @@
+import base64
+
 from gettext import gettext as _
 
 from django.conf import settings
 from jsonschema import Draft7Validator
-from rest_framework import serializers, fields
+from rest_framework import serializers
 
-from pulpcore.app.serializers import base
-from pulpcore.app.serializers.content import BaseContentSerializer
 from pulpcore.plugin.models import Artifact, SigningService
 from pulpcore.plugin.serializers import (
     DetailRelatedField,
@@ -35,7 +35,6 @@ from .models import (
     CollectionVersionSignature,
     CollectionVersionSigstoreSignature,
     CollectionRemote,
-    OIDCIdentity,
     Role,
     SigstoreSigningService,
     Tag,
@@ -137,10 +136,8 @@ class AnsibleRepositorySerializer(RepositorySerializer):
         allow_null=True,
     )
     sigstore_signing_service = DetailRelatedField(
-        help_text=_("The Sigstore signing service used to verify the signature with specified verification policies."),
-        view_name="sigstore-signing-services-detail",
-        read_only=True,
-        allow_null=True,
+        help_text=_("A signing service to use to sign the collections"),
+        queryset=SigstoreSigningService.objects.all(),
     )
     class Meta:
         fields = RepositorySerializer.Meta.fields + (
@@ -745,51 +742,97 @@ class CollectionVersionSignatureSerializer(NoArtifactContentUploadSerializer):
             "signing_service",
         )
 
-class OIDCIdentitySerializer(NoArtifactContentUploadSerializer):
-    """
-    A serializer for OIDC identities used with Sigstore.
-    """
+# class PEMPublicKeySerializer(serializers.Serializer):
 
-    identity = serializers.CharField(help_text=_("A unique identity string corresponding to the OIDC identity present as the SAN in the X509 certificate"))
-    oidc_client_id = serializers.CharField(help_text=_("Environment variable containing the OIDC client ID."))
-    oidc_client_secret = serializers.CharField(help_text=_("Environment variable containing the OIDC client secret."))
+#     pem_pubkey = serializers.CharField()
 
-    class Meta:
-        model = OIDCIdentity
-        fields = NoArtifactContentUploadSerializer.Meta.fields + (
-            "identity",
-            "oidc_client_id",
-            "oidc_client_secret",
-        )
+#     def create(self, validated_data):
+#         return PEMPublicKeySerializer(**validated_data)
+
+#     def update(self, instance, validated_data):
+#         instance.pem_pubkey = validated_data.get("pem_pubkey")
 
 class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     """
     A serializer for Sigstore signing services.
     """
 
-    name = serializers.CharField(help_text=_("A unique name used to recognize a Sigstore signing service."))
-    sigstore_rekor_instance = serializers.CharField(default="https://rekor.sigstore.dev", allow_null=True)
-    sigstore_fulcio_instance = serializers.CharField(default="https://fulcio.sigstore.dev", allow_null=True)
-    sigstore_verification_policies = serializers.ListField(child=serializers.CharField())
-    sigstore_verification_policies_all_or_any = serializers.CharField(
-        help_text=_("Choose to apply all of or any of the provided Sigstore verification policies.")
+    name = serializers.CharField(
+        help_text=_(
+            "A unique name used to recognize a Sigstore signing service")
+        )
+    rekor_url = serializers.CharField(
+        initial="https://rekor.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Rekor instance to use for logging signatures. "
+            "Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified"
+        ),
     )
-    sigstore_oidc_identity = DetailRelatedField(
-        help_text=_("The OIDC identity used to generate the Sigstore signature."),
-        read_only=True,
-        view_name="sigstore-oidc-identity"
+    fulcio_url = serializers.CharField(
+        initial="https://fulcio.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Fulcio instance for getting signing certificates. "
+            "Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified"
+        ),
     )
+    rekor_root_pubkey = serializers.CharField(
+        help_text=_("A PEM-encoded root public key for Rekor itself"), 
+        allow_null=True,
+        allow_blank=True,
+        required=False
+    )
+
+    oidc_issuer = serializers.CharField(
+        initial="https://oauth2.sigstore.dev",
+        required=True,
+        help_text=_("The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension"), 
+    )
+    oidc_client_id = serializers.CharField(
+        help_text=_("Environment variable containing the OIDC client ID"),
+        required=True
+    )
+    oidc_client_secret = serializers.CharField(
+        help_text=_("Environment variable containing the OIDC client secret"), 
+        required=True
+    )
+    ctfe = serializers.CharField(
+        help_text=_("A PEM-encoded public key for the CT log"), 
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+    )
+
+    cert_identity = serializers.CharField(
+        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"), 
+        required=True
+    )
+    require_rekor_offline = serializers.BooleanField(help_text=_("Perform signature verification offline. Requires output_rekor_bundle set to True."), required=False)
+    output_rekor_bundle = serializers.BooleanField(help_text=_("Write a single Rekor bundle file to the collection"), required=False)
+
+    # def get_rekor_root_pubkey(self, obj):
+    #     return obj.rekor_root_pubkey.replace("\\n", "\n")
+
+    # def get_ctfe(obj):
+    #     return obj.ctfe.replace("\\n", "\n")
 
     class Meta:
         model = SigstoreSigningService
         fields = NoArtifactContentUploadSerializer.Meta.fields + (
             "name",
-            "sigstore_rekor_instance",
-            "sigstore_fulcio_instance",
-            "sigstore_verification_policies",
-            "sigstore_verification_policies_all_or_any",
-            "sigstore_oidc_identity",
+            "rekor_url",
+            "fulcio_url",
+            "rekor_root_pubkey",
+            "oidc_issuer",
+            "oidc_client_id",
+            "oidc_client_secret",
+            "ctfe",
+            "cert_identity",
+            "require_rekor_offline",
+            "output_rekor_bundle",
         )
+        extra_kwargs = {'view_name': 'sigstore-signing-services-detail'}
 
 class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerializer):
     """
@@ -802,18 +845,8 @@ class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerial
         queryset=CollectionVersion.objects.all(),
     )
 
-    sigstore_x509_certificate = serializers.CharField(
-        help_text=_("The X509 signing certificate generated by Sigstore."),
-        read_only=True,
-    )
-
-    sigstore_x509_certificate_sha256_digest = serializers.CharField(
-        help_text=_("The sha256 digest of the X509 certificate generated by Sigstore."),
-        read_only=True,
-    )
-
-    sigstore_signing_service = RelatedField(
-        help_text=_("The Sigstore signing service used to create the signature."),
+    sigstore_signing_service = DetailRelatedField(
+        help_text=_("A signing service to use to sign the collections"),
         view_name="sigstore-signing-services-detail",
         read_only=True,
         allow_null=True,
@@ -841,8 +874,6 @@ class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerial
         model = CollectionVersionSigstoreSignature
         fields = NoArtifactContentUploadSerializer.Meta.fields + (
             "signed_collection",
-            "sigstore_x509_certificate",
-            "sigstore_x509_certificate_sha256_digest",
             "sigstore_signing_service",
         )
 
@@ -881,11 +912,9 @@ class AnsibleRepositorySigstoreSignatureSerializer(serializers.Serializer):
             "List of collection version hrefs to sign, use * to sign all content in repository"
         ),
     )
-    sigstore_siging_service = RelatedField(
+    sigstore_signing_service = SigstoreSigningServiceSerializer(
         required=True,
-        view_name="sigstore-signing-services-detail",
-        queryset=SigstoreSigningService.objects.all(),
-        help_text=_("A signing service used to sign collections with Sigstore."),
+        help_text=_("A signing service to use to sign the collections"),
     )
 
     def validate_content_units(self, value):

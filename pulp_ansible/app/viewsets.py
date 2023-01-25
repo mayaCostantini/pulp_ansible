@@ -41,7 +41,6 @@ from .models import (
     CollectionVersionSignature,
     CollectionVersionSigstoreSignature,
     CollectionRemote,
-    OIDCIdentity,
     Role,
     SigstoreSigningService,
     Tag,
@@ -62,7 +61,6 @@ from .serializers import (
     CollectionRemoteSerializer,
     CollectionOneShotSerializer,
     CopySerializer,
-    OIDCIdentitySerializer,
     RoleSerializer,
     SigstoreSigningServiceSerializer,
     TagSerializer,
@@ -240,22 +238,12 @@ class SigstoreSignatureFilter(ContentFilter):
             "sigstore_signing_service": ["exact"]
         }
 
-class OIDCIdentityViewSet(NoArtifactContentUploadViewSet):
-    """
-    ViewSet for looking at Sigstore registered OIDC identities.
-    """
-
-    endpoint_name = "sigstore_oidc_identities"
-    queryset = OIDCIdentity.objects.all()
-    serializer_class = OIDCIdentitySerializer
-    filterset_fields = ["identity"]
-
 class SigstoreSigningServiceViewSet(NoArtifactContentUploadViewSet):
     """
     Viewset for looking at Sigstore signing services.
     """
 
-    endpoint_name = "sigstore_signing_services"
+    endpoint_name = "sigstore-signing-services"
     queryset = SigstoreSigningService.objects.all()
     serializer_class = SigstoreSigningServiceSerializer
     filterset_fields = ["name"]
@@ -461,7 +449,7 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
             kwargs={
                 "repository_href": repository.pk,
                 "content_hrefs": content_units_pks,
-                "sigstore_signing_service_href": sigstore_signing_service.pk,
+                # "sigstore_signing_service_href": sigstore_signing_service.pk,
             },
         )
         return OperationPostponedResponse(result, request)
