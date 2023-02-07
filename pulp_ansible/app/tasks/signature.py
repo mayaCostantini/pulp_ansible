@@ -6,8 +6,8 @@ import tarfile
 import tempfile
 from gettext import gettext as _
 
-from sigstore._verify.models import VerificationFailure, VerificationSuccess
-from sigstore._internal.rekor.client import RekorBundle
+from sigstore.verify.models import VerificationFailure
+from sigstore_protobuf_specs.dev.sigstore.bundle.v1 import Bundle
 
 from pulpcore.plugin.stages import (
     ContentSaver,
@@ -35,10 +35,7 @@ from pulp_ansible.app.sigstoreutils import MissingSigstoreVerificationMaterialsE
 from rest_framework import serializers
 
 import base64
-from cryptography.x509 import load_pem_x509_certificate
-from cryptography.hazmat.primitives.serialization import Encoding
-from sigstore._verify.verifier import VerificationMaterials
-from pulp_ansible.app.sigstoreutils import get_verifier, get_verification_policy
+from sigstore_protobuf_specs.dev.sigstore.bundle.v1 import Bundle
 
 log = logging.getLogger(__name__)
 
@@ -93,25 +90,41 @@ def verify_sigstore_signature_upload(data):
         sha256sumfile = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt", artifact_file)
         sha256sumsig = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.sig", artifact_file)
         sha256sumcert = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.crt", artifact_file)
-        offline_rekor_entry = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.rekor", artifact_file)
-        missing = []
-        for verification_artifact in [sha256sumfile, sha256sumsig, sha256sumcert]:
-            if verification_artifact is None:
-                missing.append(verification_artifact)
-        if missing:
-            raise MissingSigstoreVerificationMaterialsException(f"Missing {missing} for Sigstore signature verification")
-        
-        bundle = RekorBundle.parse_raw(offline_rekor_entry.read().decode())
-        entry = bundle.to_entry()
+        sigstore_bundle = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt.sigstore", artifact_file)
 
-        verification_result = sigstore_signing_service.sigstore_verify(
-            sha256sumfile=sha256sumfile,
-            sha256sumcert=sha256sumcert.read().decode(),
-            sha256sumsig=base64.b64encode(sha256sumsig.read()),
-            offline_rekor_entry=entry
-        )
+        if not sigstore_bundle:
+            missing = []
+            for verification_artifact in [sha256sumfile, sha256sumsig, sha256sumcert]:
+                if verification_artifact is None:
+                    missing.append(verification_artifact)
+            if missing:
+                raise MissingSigstoreVerificationMaterialsException(f"Missing {missing} for Sigstore signature verification")
 
-        if isinstance(VerificationFailure, verification_result):
+            with tempfile.NamedTemporaryFile(dir=".", delete=False) as manifest_file:
+                manifest_file.write(sha256sumfile.read())
+            with open(manifest_file.name, mode="rb", buffering=0) as io:
+                verification_result = sigstore_signing_service.sigstore_verify(
+                    sha256sumfile=io,
+                    sha256sumcert=sha256sumcert.read().decode(),
+                    sha256sumsig=base64.b64encode(sha256sumsig.read()),
+                    sigstore_bundle=None,
+                    entry=None,
+                )
+
+        else:
+            bundle = Bundle().from_json(sigstore_bundle.read())
+            with tempfile.NamedTemporaryFile(dir=".", delete=False) as manifest_file:
+                manifest_file.write(sha256sumfile.read())
+            with open(manifest_file.name, mode="rb", buffering=0) as io:
+                verification_result = sigstore_signing_service.sigstore_verify(
+                    sha256sumfile=io,
+                    sha256sumcert=None,
+                    sha256sumsig=None,
+                    sigstore_bundle=bundle,
+                    entry=None,
+                )
+
+        if isinstance(verification_result, VerificationFailure):
             raise VerificationFailureException(f"Failed to verify Sigstore signature for collection {collection}")
 
         print(f"Validated Sigstore signature for collection {collection}")

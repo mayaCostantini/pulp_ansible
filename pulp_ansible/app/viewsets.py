@@ -243,7 +243,7 @@ class SigstoreSigningServiceViewSet(NoArtifactContentUploadViewSet):
     Viewset for looking at Sigstore signing services.
     """
 
-    endpoint_name = "sigstore-signing-services"
+    endpoint_name = "sigstore_signing_services"
     queryset = SigstoreSigningService.objects.all()
     serializer_class = SigstoreSigningServiceSerializer
     filterset_fields = ["name"]

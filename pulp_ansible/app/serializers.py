@@ -121,6 +121,87 @@ class GitRemoteSerializer(RemoteSerializer):
             "git_ref",
         )
 
+class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
+    """
+    A serializer for Sigstore signing services.
+    """
+
+    name = serializers.CharField(
+        help_text=_(
+            "A unique name used to recognize a Sigstore signing service")
+        )
+    rekor_url = serializers.CharField(
+        initial="https://rekor.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Rekor instance to use for logging signatures. "
+            "Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified"
+        ),
+    )
+    fulcio_url = serializers.CharField(
+        initial="https://fulcio.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Fulcio instance for getting signing certificates. "
+            "Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified"
+        ),
+    )
+    rekor_root_pubkey = serializers.CharField(
+        help_text=_("A PEM-encoded root public key for Rekor itself"), 
+        allow_null=True,
+        allow_blank=True,
+        required=False
+    )
+
+    oidc_issuer = serializers.CharField(
+        initial="https://oauth2.sigstore.dev",
+        required=True,
+        help_text=_("The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension"), 
+    )
+    oidc_client_id = serializers.CharField(
+        help_text=_("Environment variable containing the OIDC client ID"),
+        required=True
+    )
+    oidc_client_secret = serializers.CharField(
+        help_text=_("Environment variable containing the OIDC client secret"), 
+        required=True
+    )
+    ctfe = serializers.CharField(
+        help_text=_("A PEM-encoded public key for the CT log"), 
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+    )
+
+    cert_identity = serializers.CharField(
+        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"), 
+        required=True
+    )
+    verify_offline = serializers.BooleanField(
+        help_text=_("Perform signature verification offline. Requires sigstore_bundle set to True."),
+        default=False,
+    )
+    sigstore_bundle = serializers.BooleanField(
+        help_text=_("Write a single Sigstore bundle file to the collection"),
+        default=False,
+    )
+
+    class Meta:
+        model = SigstoreSigningService
+        fields = NoArtifactContentUploadSerializer.Meta.fields + (
+            "name",
+            "rekor_url",
+            "fulcio_url",
+            "rekor_root_pubkey",
+            "oidc_issuer",
+            "oidc_client_id",
+            "oidc_client_secret",
+            "ctfe",
+            "cert_identity",
+            "verify_offline",
+            "sigstore_bundle",
+        )
+        extra_kwargs = {'view_name': 'sigstore-signing-services-detail'}
 
 class AnsibleRepositorySerializer(RepositorySerializer):
     """
@@ -146,7 +227,6 @@ class AnsibleRepositorySerializer(RepositorySerializer):
             "sigstore_signing_service",
         )
         model = AnsibleRepository
-
 
 class AnsibleRepositorySyncURLSerializer(RepositorySyncURLSerializer):
     """
@@ -741,98 +821,6 @@ class CollectionVersionSignatureSerializer(NoArtifactContentUploadSerializer):
             "pubkey_fingerprint",
             "signing_service",
         )
-
-# class PEMPublicKeySerializer(serializers.Serializer):
-
-#     pem_pubkey = serializers.CharField()
-
-#     def create(self, validated_data):
-#         return PEMPublicKeySerializer(**validated_data)
-
-#     def update(self, instance, validated_data):
-#         instance.pem_pubkey = validated_data.get("pem_pubkey")
-
-class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
-    """
-    A serializer for Sigstore signing services.
-    """
-
-    name = serializers.CharField(
-        help_text=_(
-            "A unique name used to recognize a Sigstore signing service")
-        )
-    rekor_url = serializers.CharField(
-        initial="https://rekor.sigstore.dev",
-        required=True,
-        help_text=_(
-            "The URL of the Rekor instance to use for logging signatures. "
-            "Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified"
-        ),
-    )
-    fulcio_url = serializers.CharField(
-        initial="https://fulcio.sigstore.dev",
-        required=True,
-        help_text=_(
-            "The URL of the Fulcio instance for getting signing certificates. "
-            "Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified"
-        ),
-    )
-    rekor_root_pubkey = serializers.CharField(
-        help_text=_("A PEM-encoded root public key for Rekor itself"), 
-        allow_null=True,
-        allow_blank=True,
-        required=False
-    )
-
-    oidc_issuer = serializers.CharField(
-        initial="https://oauth2.sigstore.dev",
-        required=True,
-        help_text=_("The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension"), 
-    )
-    oidc_client_id = serializers.CharField(
-        help_text=_("Environment variable containing the OIDC client ID"),
-        required=True
-    )
-    oidc_client_secret = serializers.CharField(
-        help_text=_("Environment variable containing the OIDC client secret"), 
-        required=True
-    )
-    ctfe = serializers.CharField(
-        help_text=_("A PEM-encoded public key for the CT log"), 
-        allow_null=True,
-        allow_blank=True,
-        required=False,
-    )
-
-    cert_identity = serializers.CharField(
-        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"), 
-        required=True
-    )
-    require_rekor_offline = serializers.BooleanField(help_text=_("Perform signature verification offline. Requires output_rekor_bundle set to True."), required=False)
-    output_rekor_bundle = serializers.BooleanField(help_text=_("Write a single Rekor bundle file to the collection"), required=False)
-
-    # def get_rekor_root_pubkey(self, obj):
-    #     return obj.rekor_root_pubkey.replace("\\n", "\n")
-
-    # def get_ctfe(obj):
-    #     return obj.ctfe.replace("\\n", "\n")
-
-    class Meta:
-        model = SigstoreSigningService
-        fields = NoArtifactContentUploadSerializer.Meta.fields + (
-            "name",
-            "rekor_url",
-            "fulcio_url",
-            "rekor_root_pubkey",
-            "oidc_issuer",
-            "oidc_client_id",
-            "oidc_client_secret",
-            "ctfe",
-            "cert_identity",
-            "require_rekor_offline",
-            "output_rekor_bundle",
-        )
-        extra_kwargs = {'view_name': 'sigstore-signing-services-detail'}
 
 class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerializer):
     """
