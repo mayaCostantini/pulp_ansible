@@ -1,3 +1,5 @@
+import base64
+
 from gettext import gettext as _
 
 from django.conf import settings
@@ -32,8 +34,10 @@ from .models import (
     CollectionImport,
     CollectionVersion,
     CollectionVersionSignature,
+    CollectionVersionSigstoreSignature,
     CollectionRemote,
     Role,
+    SigstoreSigningService,
     Tag,
 )
 from pulp_ansible.app.schema import COPY_CONFIG_SCHEMA
@@ -41,7 +45,7 @@ from pulp_ansible.app.tasks.utils import (
     parse_collections_requirements_file,
     parse_collection_filename,
 )
-from pulp_ansible.app.tasks.signature import verify_signature_upload
+from pulp_ansible.app.tasks.signature import verify_signature_upload, verify_sigstore_signature_upload
 from pulp_ansible.app.tasks.upload import process_collection_artifact, finish_collection_upload
 
 
@@ -118,6 +122,87 @@ class GitRemoteSerializer(RemoteSerializer):
             "git_ref",
         )
 
+class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
+    """
+    A serializer for Sigstore signing services.
+    """
+
+    name = serializers.CharField(
+        help_text=_(
+            "A unique name used to recognize a Sigstore signing service")
+        )
+    rekor_url = serializers.CharField(
+        initial="https://rekor.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Rekor instance to use for logging signatures. "
+            "Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified"
+        ),
+    )
+    fulcio_url = serializers.CharField(
+        initial="https://fulcio.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Fulcio instance for getting signing certificates. "
+            "Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified"
+        ),
+    )
+    rekor_root_pubkey = serializers.CharField(
+        help_text=_("A PEM-encoded root public key for Rekor itself"), 
+        allow_null=True,
+        allow_blank=True,
+        required=False
+    )
+
+    oidc_issuer = serializers.CharField(
+        initial="https://oauth2.sigstore.dev",
+        required=True,
+        help_text=_("The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension"), 
+    )
+    oidc_client_id = serializers.CharField(
+        help_text=_("Environment variable containing the OIDC client ID"),
+        required=True
+    )
+    oidc_client_secret = serializers.CharField(
+        help_text=_("Environment variable containing the OIDC client secret"), 
+        required=True
+    )
+    ctfe = serializers.CharField(
+        help_text=_("A PEM-encoded public key for the CT log"), 
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+    )
+
+    cert_identity = serializers.CharField(
+        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"), 
+        required=True
+    )
+    verify_offline = serializers.BooleanField(
+        help_text=_("Perform signature verification offline. Requires sigstore_bundle set to True."),
+        default=False,
+    )
+    sigstore_bundle = serializers.BooleanField(
+        help_text=_("Write a single Sigstore bundle file to the collection"),
+        default=False,
+    )
+
+    class Meta:
+        model = SigstoreSigningService
+        fields = NoArtifactContentUploadSerializer.Meta.fields + (
+            "name",
+            "rekor_url",
+            "fulcio_url",
+            "rekor_root_pubkey",
+            "oidc_issuer",
+            "oidc_client_id",
+            "oidc_client_secret",
+            "ctfe",
+            "cert_identity",
+            "verify_offline",
+            "sigstore_bundle",
+        )
+        extra_kwargs = {'view_name': 'sigstore-signing-services-detail'}
 
 class AnsibleRepositorySerializer(RepositorySerializer):
     """
@@ -133,15 +218,18 @@ class AnsibleRepositorySerializer(RepositorySerializer):
         required=False,
         allow_null=True,
     )
-
+    sigstore_signing_service = DetailRelatedField(
+        help_text=_("A signing service to use to sign the collections"),
+        queryset=SigstoreSigningService.objects.all(),
+    )
     class Meta:
         fields = RepositorySerializer.Meta.fields + (
             "last_synced_metadata_time",
             "gpgkey",
+            "sigstore_signing_service",
             "last_sync_task",
         )
         model = AnsibleRepository
-
 
 class AnsibleRepositorySyncURLSerializer(RepositorySyncURLSerializer):
     """
@@ -740,6 +828,48 @@ class CollectionVersionSignatureSerializer(NoArtifactContentUploadSerializer):
             "signing_service",
         )
 
+class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerializer):
+    """
+    A serializer for Sigstore signature models.
+    """
+
+    signed_collection = DetailRelatedField(
+        help_text=_("The content this signature is pointing to."),
+        view_name_pattern=r"content(-.*/.*)-detail",
+        queryset=CollectionVersion.objects.all(),
+    )
+
+    sigstore_signing_service = DetailRelatedField(
+        help_text=_("A signing service to use to sign the collections"),
+        view_name="sigstore-signing-services-detail",
+        read_only=True,
+        allow_null=True,
+    )
+
+    def __init__(self, *args, **kwargs):
+        """Ensure `file` field is required."""
+        super().__init__(*args, **kwargs)
+        self.fields["file"].required = True
+
+    def validate(self, data):
+        """
+        Verify the signature is valid before creating it.
+        """
+        data = super().validate(data)
+
+        if "request" not in self.context:
+            # Validate is called twice, first on the viewset, and second on the create task
+            # data should be set up properly on the second time, when request isn't in context
+            data = verify_sigstore_signature_upload(data)
+
+        return data
+
+    class Meta:
+        model = CollectionVersionSigstoreSignature
+        fields = NoArtifactContentUploadSerializer.Meta.fields + (
+            "signed_collection",
+            "sigstore_signing_service",
+        )
 
 class AnsibleRepositorySignatureSerializer(serializers.Serializer):
     """
@@ -765,6 +895,27 @@ class AnsibleRepositorySignatureSerializer(serializers.Serializer):
             raise serializers.ValidationError("Cannot supply content units and '*'.")
         return value
 
+class AnsibleRepositorySigstoreSignatureSerializer(serializers.Serializer):
+    """
+    A serializer for the signing action using Sigstore.
+    """
+
+    content_units = serializers.ListField(
+        required=True,
+        help_text=_(
+            "List of collection version hrefs to sign, use * to sign all content in repository"
+        ),
+    )
+    sigstore_signing_service = SigstoreSigningServiceSerializer(
+        required=True,
+        help_text=_("A signing service to use to sign the collections"),
+    )
+
+    def validate_content_units(self, value):
+        """Make sure the list is correctly formatted."""
+        if len(value) > 1 and "*" in value:
+            raise serializers.ValidationError("Cannot supply content units and '*'.")
+        return value
 
 class CollectionImportListSerializer(serializers.ModelSerializer):
     """
