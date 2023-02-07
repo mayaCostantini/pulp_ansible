@@ -21,6 +21,7 @@ from pulpcore.plugin.serializers import (
     DistributionSerializer,
     RepositoryVersionRelatedField,
     validate_unknown_fields,
+    TaskSerializer,
 )
 from rest_framework.exceptions import ValidationError
 
@@ -211,6 +212,7 @@ class AnsibleRepositorySerializer(RepositorySerializer):
     last_synced_metadata_time = serializers.DateTimeField(
         help_text=_("Last synced metadata time."), allow_null=True, required=False
     )
+    last_sync_task = TaskSerializer(read_only=True)
     gpgkey = serializers.CharField(
         help_text="Gpg public key to verify collection signatures against",
         required=False,
@@ -225,6 +227,7 @@ class AnsibleRepositorySerializer(RepositorySerializer):
             "last_synced_metadata_time",
             "gpgkey",
             "sigstore_signing_service",
+            "last_sync_task",
         )
         model = AnsibleRepository
 
@@ -299,6 +302,8 @@ class CollectionRemoteSerializer(RemoteSerializer):
         default=False,
     )
 
+    last_sync_task = TaskSerializer(read_only=True)
+
     def validate(self, data):
         """
         Validate collection remote data.
@@ -350,6 +355,7 @@ class CollectionRemoteSerializer(RemoteSerializer):
             "token",
             "sync_dependencies",
             "signed_only",
+            "last_sync_task",
         )
         model = CollectionRemote
 

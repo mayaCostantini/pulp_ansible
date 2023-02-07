@@ -402,6 +402,11 @@ class RoleRemote(Remote):
         default_related_name = "%(app_label)s_%(model_name)s"
 
 
+def _get_last_sync_task(pk):
+    sync_tasks = Task.objects.filter(name__contains="sync", reserved_resources_record__icontains=pk)
+    return sync_tasks.order_by("-pulp_created").first()
+
+
 class CollectionRemote(Remote):
     """
     A Remote for Collection content.
@@ -435,6 +440,10 @@ class CollectionRemote(Remote):
         except AttributeError:
             self._download_factory = AnsibleDownloaderFactory(self)
             return self._download_factory
+
+    @property
+    def last_sync_task(self):
+        return _get_last_sync_task(self.pk)
 
     @hook(
         AFTER_UPDATE,
@@ -496,13 +505,17 @@ class AnsibleRepository(Repository):
         CollectionVersionSignature,
         CollectionVersionSigstoreSignature,
     ]
-    REMOTE_TYPES = [RoleRemote, CollectionRemote]
+    REMOTE_TYPES = [RoleRemote, CollectionRemote, GitRemote]
 
     last_synced_metadata_time = models.DateTimeField(null=True)
     gpgkey = models.TextField(null=True)
     sigstore_signing_service = models.ForeignKey(
         SigstoreSigningService, on_delete=models.SET_NULL, related_name="ansible_repositories", null=True
     )
+
+    @property
+    def last_sync_task(self):
+        return _get_last_sync_task(self.pk)
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"
