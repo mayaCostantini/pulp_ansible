@@ -906,8 +906,8 @@ class AnsibleRepositorySigstoreSignatureSerializer(serializers.Serializer):
             "List of collection version hrefs to sign, use * to sign all content in repository"
         ),
     )
-    sigstore_signing_service = SigstoreSigningServiceSerializer(
-        required=True,
+    sigstore_signing_service = DetailRelatedField(
+        queryset=SigstoreSigningService.objects.all(),
         help_text=_("A signing service to use to sign the collections"),
     )
 
