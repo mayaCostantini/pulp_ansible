@@ -1,3 +1,13 @@
+import aiohttp
+import base64
+import hashlib
+import json
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
+from gettext import gettext as _
+
 from logging import getLogger
 
 from django.conf import settings
@@ -18,14 +28,34 @@ from pulpcore.plugin.models import (
     Task,
     EncryptedTextField,
 )
-from pulp_ansible.app.sigstoreutils import get_verifier
+from pulpcore.plugin.sync import sync_to_async
 from .downloaders import AnsibleDownloaderFactory
 
+from pulp_ansible.app.sigstoreutils import MissingIdentityToken
+from pulp_ansible.app.sigstoreutils import Keycloak
+
+from sigstore._internal.oidc.ambient import detect_gcp
+from sigstore._internal.fulcio.client import FulcioClient
+from sigstore._internal.rekor.client import RekorClient
+from sigstore._internal.rekor.client import RekorClientError
+from sigstore._internal.tuf import TrustUpdater
+from sigstore.oidc import Issuer
+from sigstore.sign import Signer
+from sigstore.sign import SigningResult
+from sigstore.transparency import LogEntry
+from sigstore.verify.verifier import Verifier
 from sigstore.verify.verifier import VerificationMaterials
 from sigstore.verify.policy import Identity
 
+from urllib.parse import urljoin
+
 
 log = getLogger(__name__)
+
+
+DEFAULT_REKOR_URL = "https://rekor.sigstore.dev"
+DEFAULT_FULCIO_URL = "https://fulcio.sigstore.dev"
+DEFAULT_TUF_URL = "https://sigstore-tuf-root.storage.googleapis.com/"
 
 
 class Role(Content):
@@ -209,7 +239,7 @@ class CollectionVersionSignature(Content):
     A content type representing a signature that is attached to a content unit.
 
     Fields:
-        data (models.BinaryField): A signature, base64 encoded. # Not sure if it is base64 encoded
+        data (models.TextField): A signature, base64 encoded. # Not sure if it is base64 encoded
         digest (models.CharField): A signature sha256 digest.
         pubkey_fingerprint (models.CharField): A fingerprint of the public key used.
 
@@ -244,20 +274,25 @@ class SigstoreSigningService(Content):
     Fields:
         name (models.CharField):
             Name of the Sigstore signing service.
+        environment (models.CharField):
+            Optional cloud environment where the Pulp server is deployed.
+            Used to faciliate identity token retrieval by Sigstore in cloud environments.
         rekor_url (models.TextField):
             The URL of the Rekor instance to use for logging signatures.
             Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified.
         rekor_root_pubkey (models.TextField):
             A PEM-encoded root public key for Rekor itself.
-        oidc_issuer (models.TextField):
-            The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension.
         fulcio_url (models.TextField):
             The URL of the Fulcio instance to use for getting signing certificates.
             Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified.
-        oidc_client_id (models.CharField):
-            Environment variable containing the OIDC client ID.
-        oidc_client_secret (models.CharField):
-            Environment variable containing the OIDC client secret.
+        tuf_url (models.TextField):
+            The URL of the TUF metadata repository instance to use.
+            Defaults to the public TUF instance URL (https://sigstore-tuf-root.storage.googleapis.com/) if not specified.
+        oidc_issuer (models.TextField):
+            The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension.
+            Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth) if not specified.
+        credentials_file_path (models.TextField):
+            Path to the OIDC client ID and client secret file on the server to authentify to Sigstore.
         ctfe (models.TextField):
             A PEM-encoded public key for the CT log.
         cert_identity (models.TextField):
@@ -266,37 +301,178 @@ class SigstoreSigningService(Content):
             Perform signature verification offline. Requires sigstore_bundle set to True.
         sigstore_bundle (models.BooleanField):
             Write a single Sigstore bundle file to the collection.
+        set_keycloak (models.BooleanField):
+            Set Keycloak as the OIDC issuer.
+            Defaults to True.
+        disable_interactive (models.BooleanField):
+            Disable Sigstore's interactive browser flow.
+            Defaults to 'true' if not specified.
     """
 
     TYPE = "sigstore_signing_services"
+    ENVIRONMENTS = (
+        ("google_cloud_platform", _("Google Cloud Platform")),
+        ("amazon_web_services", _("Amazon Web Services")),
+    )
 
     name = models.CharField(db_index=True, unique=True, max_length=64)
+    environment = models.CharField(null=True, choices=ENVIRONMENTS, max_length=64)
     rekor_url = models.TextField(default="https://rekor.sigstore.dev")
     rekor_root_pubkey = models.TextField(null=True)
-    oidc_issuer = models.TextField(default="https://oauth2.sigstore.dev")
     fulcio_url = models.TextField(default="https://fulcio.sigstore.dev")
-    oidc_client_id = models.CharField(max_length=64)
-    oidc_client_secret = models.CharField(max_length=64)
+    tuf_url = models.TextField(default="https://sigstore-tuf-root.storage.googleapis.com/")
+    oidc_issuer = models.TextField(default="https://oauth2.sigstore.dev/auth")
+    credentials_file_path = models.TextField(null=True)
     ctfe = models.TextField(null=True)
     cert_identity = models.TextField() # There is theoretically no limit to the size of an X509 certificate SAN.
     verify_offline = models.BooleanField(null=True)
     sigstore_bundle = models.BooleanField(null=True)
-    
-    def sigstore_sign(self, input, identity_token):
-        """Sign collections with Sigstore."""
-        pass 
+    set_keycloak = models.BooleanField(default=True)
+    disable_interactive = models.BooleanField(default=True)
 
-    async def sigstore_asign(self, input, identity_token):
-        """Sign collections with Sigstore asynchronously."""
+    @property
+    def fulcio(self):
+        """Get a Fulcio instance."""
+        # TODO: return a customized instance for self.fulcio_url
+        return FulcioClient.production()
+
+    @property
+    def rekor(self):
+        """Get a Rekor instance."""
+        # TODO: return a customized instance for self.fulcio_url
+        return RekorClient.production(self.trust_updater)
+
+    @property
+    def issuer(self):
+        """Get an OIDC issuer instance."""
+        return Issuer(self.oidc_issuer)
+
+    @property
+    def keycloak(self):
+        """Return a Keycloak instance used as an issuer."""
+        return Keycloak(self.oidc_issuer)
+
+    @property
+    def trust_updater(self):
+        """Get a custom TrustUpdater instance depending on the TUF metadata repository provided."""
+        # TODO: Add custom Issuer instance support for self.oidc_issuer
+        return TrustUpdater.production()
+
+    @property
+    def verifier(self):
+        """Get a Verifier instance."""
+        # TODO: Add custom Verifier instance support for self.rekor_url and self.tuf_url
+        return Verifier.production()
+
+    @property
+    def signer(self):
+        """Get a Signer instance."""
+        # TODO: Add custom Signer instance support for self.rekor_url and self.fulcio_url
+        return Signer.production()
+
+    def get_identity_token_gcp(self):
+        """Get identity token when in a GCP environment."""
+        # TODO: Complete implementation
+        return detect_gcp()
+
+    def get_identity_token_aws(self):
+        """Get identity token when in an AWS environment."""
+        # TODO: Complete implementation
         pass
 
-    def sigstore_verify(self, sha256sumfile, sha256sumsig, sha256sumcert, sigstore_bundle, entry):
-        # TODO: TUF URL as a sigstore signing service field.
-        verifier = get_verifier(
-            rekor_root_pubkey=self.rekor_root_pubkey,
-            rekor_url=self.rekor_url
+    def sigstore_sign(self, input_bytes):
+        """Sign collections with Sigstore."""
+        if self.sigstore_bundle: 
+            log.warn(
+                "sigstore_bundle support is experimental; the behaviour of this flag may change "
+                "between releases until stabilized."
+            )
+        signing_result = {}
+
+        if self.environment == "google_cloud_platform":
+            identity_token = self.get_identity_token_gcp()
+
+        elif self.environment == "amazon_web_services":
+            identity_token = self.get_identity_token_aws()
+
+        else:
+            with open(self.credentials_file_path, "r") as credentials_file:
+                credentials = json.load(credentials_file)
+                client_id, client_secret = credentials["keycloak_client_id"], credentials["keycloak_client_secret"]
+            if self.set_keycloak:
+                issuer = self.keycloak
+                identity_token = issuer.identity_token(client_id, client_secret, self.disable_interactive)
+            else:
+                issuer = self.issuer
+                identity_token = issuer.identity_token(client_id, client_secret)
+
+        if not identity_token:
+            raise MissingIdentityToken(
+                "Sigstore signing failed: OIDC identity token could not be found"
+            )
+
+        log.info("Signing artifact checksum file")
+
+        result = self.signer.sign(
+            input=input_bytes,
+            identity_token=identity_token,
         )
 
+        log.info(f"Using ephemeral certificate: {result.cert_pem}")
+        log.info(f"Transparency log entry created at index: {result.log_entry.log_index}")
+        signing_result["signature"] = result.b64_signature
+        signing_result["certificate"] = result.cert_pem
+        if self.sigstore_bundle and result.bundle:
+            signing_result["bundle"] = result._to_bundle().to_json()
+
+        return signing_result
+
+    async def sigstore_asign(self, input_digest, private_key, b64_cert):
+        """Sign collections with Sigstore asynchronously."""
+        signing_result = {}
+        artifact_signature = await sync_to_async(private_key.sign)(input_digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+        b64_artifact_signature = base64.b64encode(artifact_signature).decode()
+        rekor_post_entry_payload = {
+            "kind": "hashedrekord",
+            "apiVersion": "0.0.1",
+            "spec": {
+                "signature": {
+                    "content": b64_artifact_signature,
+                    "publicKey": {"content": b64_cert.decode()},
+                },
+                "data": {
+                    "hash": {"algorithm": "sha256", "value": input_digest.hex()}
+                },
+            },
+        }
+
+        rekor_post_entries_url = urljoin(self.rekor.url, "entries/")
+        async with aiohttp.ClientSession(
+            headers={"Content-Type": "application/json", "Accept": "application/json"}
+        ) as session:
+            try:
+                async with session.post(rekor_post_entries_url, json=rekor_post_entry_payload) as resp:
+                    rekor_response = await resp.json()
+            except aiohttp.web.HTTPError as http_error:
+                raise RekorClientError from http_error
+
+        log_entry = LogEntry._from_response(rekor_response.json())
+        log.info(f"Transparency log entry created with index: {log_entry.log_index}")
+
+        result = SigningResult(
+            input_digest=input_digest.hex(),
+            cert_pem=b64_cert.decode(),
+            b64_signature=b64_artifact_signature,
+            log_entry=log_entry,
+        )
+
+        signing_result["signature"] = result.b64_signature
+        signing_result["certificate"] = result.cert_pem
+        if self.sigstore_bundle and result.bundle:
+            signing_result["bundle"] = result._to_bundle().to_json()
+
+    def sigstore_verify(self, sha256sumfile, sha256sumsig, sha256sumcert, sigstore_bundle, entry):
+        """Verify a Sigstore signature validity."""
         if self.verify_offline and not sigstore_bundle:
             raise ValueError("Offline verification requires a Sigstore bundle.")
 
@@ -317,7 +493,7 @@ class SigstoreSigningService(Content):
             identity=self.cert_identity,
             issuer=self.oidc_issuer,
         )
-        return verifier.verify(
+        return self.verifier.verify(
             materials=verification_materials,
             policy=policy
         )
@@ -332,13 +508,11 @@ class CollectionVersionSigstoreSignature(Content):
     Fields:
         data (models.BinaryField):
             A signature, base64 encoded.
-        digest (models.CharField):
-            A signature sha256 digest.
         sigstore_x509_certificate (models.BinaryField):
             The ephemeral PEM-encoded signing certificate generated by Sigstore.
         sigstore_x509_certificate_sha256_digest (models.CharField):
-            X509 signing certificate digest.
-        sigstore_bundle (models.CharField):
+            X509 signing certificate digest, used for filtering.
+        sigstore_bundle (models.TextField):
             A Sigstore bundle used for offline verification.
 
     Relations:
@@ -348,19 +522,24 @@ class CollectionVersionSigstoreSignature(Content):
             The Sigstore Siging Service used for signing the collection version.
     """
 
-    TYPE = "collection_sigstore_signature"
+    TYPE = "collection_sigstore_signatures"
 
     signed_collection = models.ForeignKey(
         CollectionVersion, on_delete=models.CASCADE, related_name="sigstore_signatures"
     )
-    data = models.BinaryField()
-    digest = models.CharField(max_length=64)
+    data = models.CharField(max_length=256)
     sigstore_signing_service = models.ForeignKey(
         SigstoreSigningService, on_delete=models.SET_NULL, related_name="sigstore_signatures", null=True
     )
     sigstore_x509_certificate = models.BinaryField()
-    sigstore_x509_certificate_sha256_digest = models.CharField(max_length=64)
+    sigstore_x509_certificate_sha256_digest = models.CharField(max_length=256)
     sigstore_bundle = models.TextField(null=True)
+
+    def save(self, *args, **kwargs):
+        """Create X509 certificate digest upon saving."""
+        self.sigstore_x509_certificate = base64.b64encode(self.sigstore_x509_certificate.encode("ascii"))
+        self.sigstore_x509_certificate_sha256_digest = hashlib.sha256(self.sigstore_x509_certificate).hexdigest()
+        return super(CollectionVersionSigstoreSignature, self).save(*args, **kwargs)
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"
@@ -495,6 +674,11 @@ class AnsibleRepository(Repository):
     Fields:
 
         last_synced_metadata_time (models.DateTimeField): Last synced metadata time.
+        gpgkey (models.TextField): GPG key for verifying signatures.
+    
+    Relations:
+
+        sistore_signing_service (models.ForeignKey): Sigstore Signing Service used to sign and verify collections.--
     """
 
     TYPE = "ansible"

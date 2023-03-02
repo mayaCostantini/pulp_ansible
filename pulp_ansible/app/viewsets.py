@@ -456,7 +456,7 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
             kwargs={
                 "repository_href": repository.pk,
                 "content_hrefs": content_units_pks,
-                # "sigstore_signing_service_href": sigstore_signing_service.pk,
+                "sigstore_signing_service_href": sigstore_signing_service.pk,
             },
         )
         return OperationPostponedResponse(result, request)
