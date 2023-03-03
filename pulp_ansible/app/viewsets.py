@@ -23,8 +23,10 @@ from pulpcore.plugin.viewsets import (
     ContentViewSet,
     HyperlinkRelatedFilter,
     NamedModelViewSet,
+    NAME_FILTER_OPTIONS,
     NoArtifactContentUploadViewSet,
     OperationPostponedResponse,
+    ReadOnlyContentViewSet,
     RemoteViewSet,
     RepositoryViewSet,
     RepositoryVersionViewSet,
@@ -34,6 +36,8 @@ from pulp_ansible.app.galaxy.mixins import UploadGalaxyCollectionMixin
 from .models import (
     AnsibleCollectionDeprecated,
     AnsibleDistribution,
+    AnsibleNamespaceMetadata,
+    CollectionVersionMark,
     GitRemote,
     RoleRemote,
     AnsibleRepository,
@@ -48,9 +52,12 @@ from .models import (
 )
 from .serializers import (
     AnsibleDistributionSerializer,
+    AnsibleNamespaceMetadataSerializer,
+    CollectionVersionMarkSerializer,
     GitRemoteSerializer,
     RoleRemoteSerializer,
     AnsibleRepositorySerializer,
+    AnsibleRepositoryMarkSerializer,
     AnsibleRepositorySyncURLSerializer,
     AnsibleRepositoryRebuildSerializer,
     AnsibleRepositorySignatureSerializer,
@@ -72,6 +79,8 @@ from .tasks.copy import copy_content
 from .tasks.roles import synchronize as role_sync
 from .tasks.git import synchronize as git_sync
 from .tasks.signature import sign, sigstore_sign
+from .tasks.mark import mark, unmark
+from .tasks.signature import sign
 
 
 class RoleFilter(ContentFilter):
@@ -275,6 +284,36 @@ class CollectionVersionSigstoreSignatureViewSet(NoArtifactContentUploadViewSet):
     queryset = CollectionVersionSigstoreSignature.objects.all()
     serializer_class = CollectionVersionSigstoreSignatureSerializer
 
+class CollectionVersionMarkFilter(ContentFilter):
+    """
+    A filter for marks.
+    """
+
+    marked_collection = HyperlinkRelatedFilter(
+        field_name="marked_collection",
+        help_text=_("Filter marks for collection version"),
+    )
+    value = filters.CharFilter(field_name="value", help_text=_("Filter marks by value"))
+
+    class Meta:
+        model = CollectionVersionMark
+        fields = {
+            "marked_collection": ["exact"],
+            "value": ["exact", "in"],
+        }
+
+
+class CollectionVersionMarkViewSet(ContentViewSet):
+    """
+    ViewSet for looking at mark objects for CollectionVersion content.
+    """
+
+    endpoint_name = "collection_marks"
+    filterset_class = CollectionVersionMarkFilter
+    queryset = CollectionVersionMark.objects.all()
+    serializer_class = CollectionVersionMarkSerializer
+
+
 class CollectionDeprecatedViewSet(ContentViewSet):
     """
     ViewSet for AnsibleCollectionDeprecated.
@@ -283,6 +322,31 @@ class CollectionDeprecatedViewSet(ContentViewSet):
     endpoint_name = "collection_deprecations"
     queryset = AnsibleCollectionDeprecated.objects.all()
     serializer_class = CollectionSerializer
+
+
+class AnsibleNamespaceFilter(ContentFilter):
+    """
+    A filter for namespaces.
+    """
+
+    class Meta:
+        model = AnsibleNamespaceMetadata
+        fields = {
+            "name": NAME_FILTER_OPTIONS,
+            "company": NAME_FILTER_OPTIONS,
+            "metadata_sha256": ["exact", "in"],
+        }
+
+
+class AnsibleNamespaceViewSet(ReadOnlyContentViewSet):
+    """
+    ViewSet for AnsibleNamespace.
+    """
+
+    endpoint_name = "namespaces"
+    queryset = AnsibleNamespaceMetadata.objects.all()
+    serializer_class = AnsibleNamespaceMetadataSerializer
+    filterset_class = AnsibleNamespaceFilter
 
 
 class RoleRemoteViewSet(RemoteViewSet):
@@ -388,7 +452,7 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
     @action(detail=True, methods=["post"], serializer_class=AnsibleRepositorySignatureSerializer)
     def sign(self, request, pk):
         """
-        Dispatches a signing task.
+        Dispatches a sign task.
 
         This endpoint is in tech preview and can change at any time in the future.
         """
@@ -461,6 +525,67 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
         )
         return OperationPostponedResponse(result, request)
 
+    def _handle_mark_task(self, request, task_function):
+        """
+        Dispatches the `task_function` passed either by `mark` or `unmark` actions.
+        """
+        content_units = {}
+
+        repository = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        value = serializer.validated_data["value"]
+        content = serializer.validated_data["content_units"]
+
+        if "*" in content:
+            content_units_pks = ["*"]
+        else:
+            for url in content:
+                content_units[NamedModelViewSet.extract_pk(url)] = url
+            content_units_pks = list(content_units.keys())
+            existing_content_units = CollectionVersion.objects.filter(pk__in=content_units_pks)
+            raise_for_unknown_content_units(existing_content_units, content_units)
+
+        result = dispatch(
+            task_function,  # will be `mark` or `unmark`
+            exclusive_resources=[repository],
+            kwargs={
+                "repository_href": repository.pk,
+                "content_hrefs": content_units_pks,
+                "value": value,
+            },
+        )
+        return OperationPostponedResponse(result, request)
+
+    @extend_schema(
+        description="Trigger an asynchronous task to mark Ansible content.",
+        responses={202: AsyncOperationResponseSerializer},
+    )
+    @action(detail=True, methods=["post"], serializer_class=AnsibleRepositoryMarkSerializer)
+    def mark(self, request, pk):
+        """
+        Dispatches a mark task.
+        """
+        return self._handle_mark_task(request, mark)
+
+    @extend_schema(
+        description="Trigger an asynchronous task to unmark Ansible content.",
+        responses={202: AsyncOperationResponseSerializer},
+    )
+    @action(detail=True, methods=["post"], serializer_class=AnsibleRepositoryMarkSerializer)
+    def unmark(self, request, pk):
+        """
+        Dispatches the unmark task.
+        Removes a mark from the repository, value and content_units are required
+        then only marks having `marked_collection` in the content_units list
+        will be removed from the repo.
+        The CollectionVersionMark object will not be deleted, because
+        it may be present in another repo, so we just remove from this repo
+        and let orphan cleanup take care of deletion when it is eventually
+        needed.
+        """
+        return self._handle_mark_task(request, unmark)
 
 class AnsibleRepositoryVersionViewSet(RepositoryVersionViewSet):
     """

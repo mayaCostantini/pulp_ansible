@@ -13,9 +13,10 @@ from logging import getLogger
 from django.conf import settings
 from django.db import models
 from django.db.models import UniqueConstraint, Q
+from django.db.utils import IntegrityError
 from django.contrib.postgres import fields as psql_fields
 from django.contrib.postgres import search as psql_search
-from django_lifecycle import AFTER_UPDATE, BEFORE_UPDATE, hook
+from django_lifecycle import AFTER_UPDATE, BEFORE_SAVE, BEFORE_UPDATE, hook
 
 from pulpcore.plugin.models import (
     BaseModel,
@@ -29,6 +30,7 @@ from pulpcore.plugin.models import (
     EncryptedTextField,
 )
 from pulpcore.plugin.sync import sync_to_async
+from pulpcore.plugin.repo_version_utils import remove_duplicates, validate_repo_version
 from .downloaders import AnsibleDownloaderFactory
 
 from pulp_ansible.app.sigstoreutils import MissingIdentityToken
@@ -134,6 +136,14 @@ class Tag(BaseModel):
         return self.name
 
 
+class AnsibleNamespace(BaseModel):
+    """
+    A model representing a Namespace. This should be used for permissions.
+    """
+
+    name = models.CharField(max_length=64, unique=True, editable=True)
+
+
 class CollectionVersion(Content):
     """
     A content type representing a CollectionVersion.
@@ -232,6 +242,28 @@ class CollectionVersion(Content):
                 condition=Q(is_highest=True),
             )
         ]
+
+
+class CollectionVersionMark(Content):
+    """
+    A content type representing a mark that is attached to a content unit.
+
+    Fields:
+        value (models.CharField): The value of the mark.
+        marked_collection (models.ForeignKey): Reference to a CollectionVersion.
+    """
+
+    PROTECTED_FROM_RECLAIM = False
+    TYPE = "collection_mark"
+
+    value = models.SlugField()
+    marked_collection = models.ForeignKey(
+        CollectionVersion, null=False, on_delete=models.CASCADE, related_name="marks"
+    )
+
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
+        unique_together = ("value", "marked_collection")
 
 
 class CollectionVersionSignature(Content):
@@ -545,6 +577,70 @@ class CollectionVersionSigstoreSignature(Content):
         default_related_name = "%(app_label)s_%(model_name)s"
         unique_together = ("sigstore_x509_certificate_sha256_digest", "signed_collection")
 
+class AnsibleNamespaceMetadata(Content):
+    """
+    A content type representing the Namespace metadata of a Collection.
+
+    Namespace metadata can have an avatar which is stored as an associated artifact upon upload.
+
+    Fields:
+        name (models.CharField): The required name of the Namespace
+        company (models.CharField): Optional namespace owner company name.
+        email (models.CharField): Optional namespace contact email.
+        description (models.CharField): Namespace brief description.
+        resources (models.TextField): Namespace resources page in markdown format.
+        links (psql_fields.HStore): Labeled related links.
+        avatar_sha256 (models.CharField): SHA256 digest of avatar image.
+        metadata_sha256(models.CharField): SHA256 digest of all other metadata fields.
+
+    Relations:
+        namespace (AnsibleNamespace): A link to the Namespace model used for permissions.
+    """
+
+    TYPE = "namespace"
+    repo_key_fields = ("name",)
+    # fields on the existing model in galaxy_ng
+    name = models.CharField(max_length=64, blank=False)
+    company = models.CharField(max_length=64, blank=True, default="")
+    email = models.CharField(max_length=256, blank=True, default="")
+    description = models.CharField(max_length=256, blank=True, default="")
+    resources = models.TextField(blank=True, default="")
+
+    links = psql_fields.HStoreField(default=dict)
+    avatar_sha256 = models.CharField(max_length=64, null=True)
+
+    # Hash of the values of all the fields mentioned above.
+    # Content uniqueness constraint.
+    metadata_sha256 = models.CharField(max_length=64, db_index=True, blank=False)
+    namespace = models.ForeignKey(
+        AnsibleNamespace, on_delete=models.PROTECT, related_name="metadatas"
+    )
+
+    @hook(BEFORE_SAVE)
+    def calculate_metadata_sha256(self):
+        """Calculates the metadata_sha256 from the other metadata fields."""
+        metadata = {
+            "name": self.name,
+            "company": self.company,
+            "email": self.email,
+            "description": self.description,
+            "resources": self.resources,
+            "links": self.links,
+            "avatar_sha256": self.avatar_sha256,
+        }
+        metadata_json = json.dumps(metadata, sort_keys=True).encode("utf-8")
+        hasher = hashlib.sha256(metadata_json)
+        if self.metadata_sha256:
+            # If we are creating from sync, assert that calculated hash == synced hash
+            if self.metadata_sha256 != hasher.hexdigest():
+                raise IntegrityError("Calculated digest does not equal passed in digest")
+        self.metadata_sha256 = hasher.hexdigest()
+
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
+        unique_together = ("metadata_sha256",)
+
+
 class DownloadLog(BaseModel):
     """
     A download log for content units by user, IP and org_id.
@@ -688,6 +784,8 @@ class AnsibleRepository(Repository):
         AnsibleCollectionDeprecated,
         CollectionVersionSignature,
         CollectionVersionSigstoreSignature,
+        AnsibleNamespaceMetadata,
+        CollectionVersionMark,
     ]
     REMOTE_TYPES = [RoleRemote, CollectionRemote, GitRemote]
 
@@ -712,8 +810,8 @@ class AnsibleRepository(Repository):
             base_version=new_version.base_version
         ).filter(pulp_type=CollectionVersion.get_pulp_type())
 
-        # Remove any deprecated and signature content associated with the removed collection
-        # versions
+        # Remove any deprecated, signature, mark and namespace content
+        # associated with the removed collection versions
         for version in removed_collection_versions:
             version = version.cast()
 
@@ -726,21 +824,32 @@ class AnsibleRepository(Repository):
             new_version.remove_content(signatures)
             new_version.remove_content(sigstore_signatures)
 
+            marks = new_version.get_content(
+                content_qs=CollectionVersionMark.objects.filter(marked_collection=version)
+            )
+            new_version.remove_content(marks)
+
             other_collection_versions = new_version.get_content(
                 content_qs=CollectionVersion.objects.filter(collection=version.collection)
             )
 
-            # AnsibleCollectionDeprecated applies to all collection versions in a repository,
-            # so only remove it if there are no more collection versions for the specified
-            # collection present.
+            # AnsibleCollectionDeprecated and Namespace applies to all collection versions in a
+            # repository, so only remove it if there are no more collection versions for the
+            # specified collection present.
             if not other_collection_versions.exists():
                 deprecations = new_version.get_content(
                     content_qs=AnsibleCollectionDeprecated.objects.filter(
                         namespace=version.namespace, name=version.name
                     )
                 )
+                namespace = new_version.get_content(
+                    content_qs=AnsibleNamespaceMetadata.objects.filter(name=version.namespace)
+                )
 
                 new_version.remove_content(deprecations)
+                new_version.remove_content(namespace)
+        remove_duplicates(new_version)
+        validate_repo_version(new_version)
 
     @hook(BEFORE_UPDATE, when="remote", has_changed=True)
     def _reset_repository_last_synced_metadata_time(self):
