@@ -186,6 +186,13 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth) if not specified."
         ), 
     )
+    expected_identity_provider = serializers.CharField(
+        initial="https://github.com/login/oauth",
+        required=True,
+        help_text=_("The expected identity provider to find in the signing certificate to verify. "
+                    "Defaults to GitHub OAuth endpoint (https://github.com/login/oauth) if not specified."
+        ),
+    )
     credentials_file_path = serializers.CharField(
         required=True,
         help_text=_(
@@ -198,7 +205,6 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         allow_blank=True,
         required=False,
     )
-
     cert_identity = serializers.CharField(
         help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"), 
         required=True
@@ -230,6 +236,7 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "tuf_url",
             "rekor_root_pubkey",
             "oidc_issuer",
+            "expected_identity_provider",
             "credentials_file_path",
             "ctfe",
             "cert_identity",
