@@ -3,3 +3,4 @@ orionutils
 pytest
 dynaconf
 numpy
+pillow
