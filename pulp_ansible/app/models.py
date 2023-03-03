@@ -321,8 +321,11 @@ class SigstoreSigningService(Content):
             The URL of the TUF metadata repository instance to use.
             Defaults to the public TUF instance URL (https://sigstore-tuf-root.storage.googleapis.com/) if not specified.
         oidc_issuer (models.TextField):
-            The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension.
+            The OpenID Connect issuer to use for signing.
             Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth) if not specified.
+        expected_identity_provider (models.TextField):
+            The expected identity provider to find in the signing certificate to verify.
+            Defaults to GitHub OAuth endpoint (https://github.com/login/oauth) if not specified.
         credentials_file_path (models.TextField):
             Path to the OIDC client ID and client secret file on the server to authentify to Sigstore.
         ctfe (models.TextField):
@@ -354,6 +357,7 @@ class SigstoreSigningService(Content):
     fulcio_url = models.TextField(default="https://fulcio.sigstore.dev")
     tuf_url = models.TextField(default="https://sigstore-tuf-root.storage.googleapis.com/")
     oidc_issuer = models.TextField(default="https://oauth2.sigstore.dev/auth")
+    expected_identity_provider = models.TextField(default="https://github.com/login/oauth")
     credentials_file_path = models.TextField(null=True)
     ctfe = models.TextField(null=True)
     cert_identity = models.TextField() # There is theoretically no limit to the size of an X509 certificate SAN.
@@ -523,7 +527,7 @@ class SigstoreSigningService(Content):
     
         policy = Identity(
             identity=self.cert_identity,
-            issuer=self.oidc_issuer,
+            issuer=self.expected_identity_provider,
         )
         return self.verifier.verify(
             materials=verification_materials,
