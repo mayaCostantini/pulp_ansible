@@ -338,10 +338,10 @@ class SigstoreSigningService(Content):
             Write a single Sigstore bundle file to the collection.
         set_keycloak (models.BooleanField):
             Set Keycloak as the OIDC issuer.
-            Defaults to True.
+            Defaults to True if not specified.
         disable_interactive (models.BooleanField):
             Disable Sigstore's interactive browser flow.
-            Defaults to 'true' if not specified.
+            Defaults to True if not specified.
     """
 
     TYPE = "sigstore_signing_services"
