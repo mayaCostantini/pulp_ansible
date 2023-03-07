@@ -40,7 +40,10 @@ from pulpcore.plugin.sync import sync_to_async_iterable, sync_to_async
 from pulpcore.plugin.util import gpg_verify
 from pulpcore.plugin.exceptions import InvalidSignatureError
 from pulp_ansible.app.tasks.utils import get_file_obj_from_tarball
-from pulp_ansible.app.sigstoreutils import MissingSigstoreVerificationMaterialsException, VerificationFailureException
+from pulp_ansible.app.sigstoreutils import (
+    MissingSigstoreVerificationMaterialsException,
+    VerificationFailureException,
+)
 from rest_framework import serializers
 
 import base64
@@ -87,6 +90,7 @@ def verify_signature_upload(data):
     data["pubkey_fingerprint"] = verified.fingerprint
     return data
 
+
 def verify_sigstore_signature_upload(data):
     """The task code for verifying Sigstore signature upload."""
     collection = data["signed_collection"]
@@ -96,7 +100,9 @@ def verify_sigstore_signature_upload(data):
     artifact_file = storage.open(artifact)
     with tarfile.open(fileobj=artifact_file, mode="r") as tar:
         try:
-            sha256sumfile = get_file_obj_from_tarball(tar, ".ansible-sign/sha256sum.txt", artifact_file)
+            sha256sumfile = get_file_obj_from_tarball(
+                tar, ".ansible-sign/sha256sum.txt", artifact_file
+            )
         except FileNotFoundError as e:
             raise VerificationFailureException(
                 "Missing .ansible-sign/sha256sum.txt checksums file in the collection to verify."
@@ -106,9 +112,11 @@ def verify_sigstore_signature_upload(data):
         sigstore_bundle = data.get("sigstore_bundle")
         if sigstore_signing_service.sigstore_bundle and not sigstore_bundle:
             raise MissingSigstoreVerificationMaterialsException(
-                "Sigstore signing service for this repository requires a Sigstore bundle to verify the collection signature."
+                "Sigstore signing service for this repository requires "
+                "a Sigstore bundle to verify the collection signature."
             )
-        # TODO: check if verification is possible without cert and sig and only with sigstore bundle.
+        # TODO: check if verification is possible
+        # without cert and sig and only with sigstore bundle.
         if not sigstore_bundle:
             with tempfile.NamedTemporaryFile(dir=".", delete=False) as manifest_file:
                 manifest_file.write(sha256sumfile.read())
@@ -134,15 +142,19 @@ def verify_sigstore_signature_upload(data):
                 )
 
         if isinstance(verification_result, VerificationFailure):
-            raise VerificationFailureException(f"Failed to verify Sigstore signature for collection {collection}: {verification_result.reason}")
+            raise VerificationFailureException(
+                "Failed to verify Sigstore signature for collection "
+                f"{collection}: {verification_result.reason}"
+            )
 
         print(f"Validated Sigstore signature for collection {collection}")
 
     data["data"] = signature
     data["sigstore_x509_certificate"] = certificate
     data["sigstore_signing_service"] = sigstore_signing_service
-        
+
     return data
+
 
 def sign(repository_href, content_hrefs, signing_service_href):
     """The signing task."""
@@ -162,6 +174,7 @@ def sign(repository_href, content_hrefs, signing_service_href):
     first_stage = CollectionSigningFirstStage(content, signing_service, repos_current_signatures)
     SigningDeclarativeVersion(first_stage, repository).create()
 
+
 def sigstore_sign(repository_href, content_hrefs, sigstore_signing_service_href):
     """Signing task for Sigstore."""
     repository = AnsibleRepository.objects.get(pk=repository_href)
@@ -176,9 +189,14 @@ def sigstore_sign(repository_href, content_hrefs, sigstore_signing_service_href)
     filtered_sigs = repository.latest_version().content.filter(
         pulp_type=CollectionVersionSigstoreSignature.get_pulp_type()
     )
-    repos_current_signatures = CollectionVersionSigstoreSignature.objects.filter(pk__in=filtered_sigs)
-    first_stage = CollectionSigstoreSigningFirstStage(content, sigstore_signing_service, repos_current_signatures)
+    repos_current_signatures = CollectionVersionSigstoreSignature.objects.filter(
+        pk__in=filtered_sigs
+    )
+    first_stage = CollectionSigstoreSigningFirstStage(
+        content, sigstore_signing_service, repos_current_signatures
+    )
     SigningDeclarativeVersion(first_stage, repository).create()
+
 
 class SigningDeclarativeVersion(DeclarativeVersion):
     """Custom signature pipeline."""
@@ -265,6 +283,7 @@ class CollectionSigningFirstStage(Stage):
                 await np.aincrement()
                 await self.put(DeclarativeContent(content=signature))
 
+
 class CollectionSigstoreSigningFirstStage(Stage):
     """
     This stage signs the content with Sigstore OIDC credentials provided on the Pulp server
@@ -294,11 +313,18 @@ class CollectionSigstoreSigningFirstStage(Stage):
         private_key = ec.generate_private_key(ec.SECP384R1())
         with open(self.sigstore_signing_service.credentials_file_path, "r") as credentials_file:
             credentials = json.load(credentials_file)
-            client_id, client_secret = credentials["keycloak_client_id"], credentials["keycloak_client_secret"]
+            client_id, client_secret = (
+                credentials["keycloak_client_id"],
+                credentials["keycloak_client_secret"],
+            )
             if self.sigstore_signing_service.set_keycloak:
-                identity_token = self.sigstore_signing_service.keycloak.identity_token(client_id, client_secret, self.sigstore_signing_service.disable_interactive)
+                identity_token = self.sigstore_signing_service.keycloak.identity_token(
+                    client_id, client_secret, self.sigstore_signing_service.disable_interactive
+                )
             else:
-                identity_token = self.sigstore_signing_service.issuer.identity_token(client_id, client_secret, self.sigstore_signing_service.disable_interactive)
+                identity_token = self.sigstore_signing_service.issuer.identity_token(
+                    client_id, client_secret, self.sigstore_signing_service.disable_interactive
+                )
         oidc_identity = Identity(identity_token)
 
         # Build an X.509 Certificiate Signing Request
@@ -327,21 +353,23 @@ class CollectionSigstoreSigningFirstStage(Stage):
         chain = certificate_response.chain
         verify_sct(sct, cert, chain, self.sigstore_signing_service.rekor._ct_keyring)
 
-        b64_cert = base64.b64encode(
-            cert.public_bytes(encoding=serialization.Encoding.PEM)
-        )
+        b64_cert = base64.b64encode(cert.public_bytes(encoding=serialization.Encoding.PEM))
 
         # Limits the number of subprocesses spawned/running at one time
         async with self.semaphore:
             async for collection_version in sync_to_async_iterable(collection_versions.iterator()):
                 # We use the manifest to create the signature
-                async with aiofiles.tempfile.NamedTemporaryFile(dir=".", mode="wb", delete=False) as manifest_file:
+                async with aiofiles.tempfile.NamedTemporaryFile(
+                    dir=".", mode="wb", delete=False
+                ) as manifest_file:
                     manifest_data = await sync_to_async(_extract_manifest)(collection_version)
                     await manifest_file.write(manifest_data)
                 async with aiofiles.open(manifest_file.name, mode="rb", buffering=0) as io:
                     print(io, type(io))
                     input_digest = sha256_streaming(io)
-                    result = await self.sigstore_signing_service.sigstore_asign(input_digest, private_key, b64_cert)
+                    result = await self.sigstore_signing_service.sigstore_asign(
+                        input_digest, private_key, b64_cert
+                    )
                 async with aiofiles.open(result["signature"], "rb") as sig:
                     sig_data = await sig.read()
                 async with aiofiles.open(result["certificate"], "rb") as cert:

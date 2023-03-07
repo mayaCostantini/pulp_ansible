@@ -80,7 +80,6 @@ from .tasks.roles import synchronize as role_sync
 from .tasks.git import synchronize as git_sync
 from .tasks.signature import sign, sigstore_sign
 from .tasks.mark import mark, unmark
-from .tasks.signature import sign
 
 
 class RoleFilter(ContentFilter):
@@ -228,18 +227,18 @@ class SignatureFilter(ContentFilter):
             "signing_service": ["exact"],
         }
 
+
 class SigstoreSignatureFilter(ContentFilter):
     """
     A filter for Sigstore signatures.
     """
 
     signed_collection = HyperlinkRelatedFilter(
-        field_name="signed_collection",
-        help_text=_("Filter signatures for collection version")
+        field_name="signed_collection", help_text=_("Filter signatures for collection version")
     )
     sigstore_x509_certificate_sha256_digest = HyperlinkRelatedFilter(
         field_name="x509_certificate_sha256_digest",
-        help_text=_("Filter Sigstore signatures by X509 signing certificate sha 256 digest")
+        help_text=_("Filter Sigstore signatures by X509 signing certificate sha 256 digest"),
     )
     sigstore_signing_service = HyperlinkRelatedFilter(
         field_name="sigstore_signing_service",
@@ -251,8 +250,9 @@ class SigstoreSignatureFilter(ContentFilter):
         fields = {
             "signed_collection": ["exact"],
             "sigstore_x509_certificate_sha256_digest": ["exact", "in"],
-            "sigstore_signing_service": ["exact"]
+            "sigstore_signing_service": ["exact"],
         }
+
 
 class SigstoreSigningServiceViewSet(NoArtifactContentUploadViewSet):
     """
@@ -264,6 +264,7 @@ class SigstoreSigningServiceViewSet(NoArtifactContentUploadViewSet):
     serializer_class = SigstoreSigningServiceSerializer
     filterset_fields = ["name"]
 
+
 class CollectionVersionSignatureViewSet(NoArtifactContentUploadViewSet):
     """
     ViewSet for looking at signature objects for CollectionVersion content.
@@ -274,6 +275,7 @@ class CollectionVersionSignatureViewSet(NoArtifactContentUploadViewSet):
     queryset = CollectionVersionSignature.objects.all()
     serializer_class = CollectionVersionSignatureSerializer
 
+
 class CollectionVersionSigstoreSignatureViewSet(NoArtifactContentUploadViewSet):
     """
     ViewSet for looking at Sigstore signature objects for CollectionVersion content.
@@ -283,6 +285,7 @@ class CollectionVersionSigstoreSignatureViewSet(NoArtifactContentUploadViewSet):
     filterset_class = SigstoreSignatureFilter
     queryset = CollectionVersionSigstoreSignature.objects.all()
     serializer_class = CollectionVersionSigstoreSignatureSerializer
+
 
 class CollectionVersionMarkFilter(ContentFilter):
     """
@@ -489,7 +492,9 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
         description="Trigger an asynchronous task to sign Ansible content with Sigstore.",
         responses={202: AsyncOperationResponseSerializer},
     )
-    @action(detail=True, methods=["post"], serializer_class=AnsibleRepositorySigstoreSignatureSerializer)
+    @action(
+        detail=True, methods=["post"], serializer_class=AnsibleRepositorySigstoreSignatureSerializer
+    )
     def sigstore_sign(self, request, pk):
         """
         Dispatches a Sigstore signing task.
@@ -586,6 +591,7 @@ class AnsibleRepositoryViewSet(RepositoryViewSet, ModifyRepositoryActionMixin):
         needed.
         """
         return self._handle_mark_task(request, unmark)
+
 
 class AnsibleRepositoryVersionViewSet(RepositoryVersionViewSet):
     """

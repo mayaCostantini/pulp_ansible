@@ -13,28 +13,37 @@ log = logging.getLogger(__name__)
 class SigstoreException(Exception):
     """Base class for Sigstore related Exceptions."""
 
+
 class MissingSigstoreVerificationMaterialsException(SigstoreException):
     """Exception for missing Sigstore signature verification materials."""
+
 
 class VerificationFailureException(SigstoreException):
     """Exception raised when Sigstore failed to validate an artifact signature."""
 
+
 class MissingIdentityToken(SigstoreException):
     """Exception raised during Sigstore signing when an OIDC identity token could not be found"""
+
 
 class KeycloakException(SigstoreException):
     """Exception raised when an issue occurred with the current Keycloak instance."""
 
 
 class _KeycloakOpenIDConfiguration(_OpenIDConfiguration):
-    """Extends sigstore-python's _OpenIDConfiguration with checks relative to Keycloak configuration."""
+    """
+    Extends sigstore-python's _OpenIDConfiguration
+    with checks relative to Keycloak configuration.
+    """
+
 
 class Keycloak:
     """
     Custom representation of Keycloak as an OIDC Issuer.
-    Extends the functionalities provided by https://github.com/sigstore/sigstore-python/blob/v1.1.0/sigstore/oidc.py#L55
+    Extends the functionalities provided by
+    https://github.com/sigstore/sigstore-python/blob/v1.1.0/sigstore/oidc.py#L55
     """
-    
+
     def __init__(self, keycloak_base_url):
         """Create a new Keycloak issuer with custom endpoints."""
         if not urllib.parse.urlsplit(keycloak_base_url).path.startswith("/realms"):
@@ -43,7 +52,9 @@ class Keycloak:
                 " URL should contain the current Keycloak realm to use for authentication."
             )
 
-        oidc_config_url = urllib.parse.urljoin(keycloak_base_url, ".well-known/openid-configuration")
+        oidc_config_url = urllib.parse.urljoin(
+            keycloak_base_url, ".well-known/openid-configuration"
+        )
 
         resp: requests.Response = requests.get(oidc_config_url)
         try:
@@ -58,9 +69,11 @@ class Keycloak:
 
     def identity_token(self, client_id, client_secret, disable_interactive):
         """Get an identity token from Keycloak token endpoint."""
-        # interactive mode is taken from the original sigstore python Issuer.identity_token() implementation
+        # interactive mode is taken from the original sigstore python
+        # Issuer.identity_token() implementation at
         # https://github.com/sigstore/sigstore-python/blob/v1.1.0/sigstore/oidc.py#L100
-        # This method works only on browser interaction and enables out-of-bond only if the former method fails. 
+        # This method works only on browser interaction and enables out-of-bond
+        # only if the former method fails.
         if not disable_interactive:
             from sigstore._internal.oidc.oauth import _OAuthFlow
 
@@ -71,9 +84,7 @@ class Keycloak:
                     print("Waiting for browser interaction...")
                 else:
                     server.enable_oob()
-                    print(
-                        f"Go to the following link in a browser:\n\n\t{server.auth_endpoint}"
-                    )
+                    print(f"Go to the following link in a browser:\n\n\t{server.auth_endpoint}")
 
                 if not server.is_oob():
                     # Wait until the redirect server populates the response
@@ -82,9 +93,7 @@ class Keycloak:
 
                     auth_error = server.auth_response.get("error")
                     if auth_error is not None:
-                        raise IdentityError(
-                            f"Error response from auth endpoint: {auth_error[0]}"
-                        )
+                        raise IdentityError(f"Error response from auth endpoint: {auth_error[0]}")
                     code = server.auth_response["code"][0]
                 else:
                     # In the out-of-band case, we wait until the user provides the code
@@ -140,8 +149,6 @@ class Keycloak:
         resp_json = resp.json()
         resp_error = resp_json.get("error")
         if resp_error is not None:
-                raise IdentityError(f"Error response from token endpoint: {resp_error}")
+            raise IdentityError(f"Error response from token endpoint: {resp_error}")
 
         return str(resp_json["id_token"])
-
-        

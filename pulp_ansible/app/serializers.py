@@ -50,7 +50,10 @@ from pulp_ansible.app.tasks.utils import (
     parse_collections_requirements_file,
     parse_collection_filename,
 )
-from pulp_ansible.app.tasks.signature import verify_signature_upload, verify_sigstore_signature_upload
+from pulp_ansible.app.tasks.signature import (
+    verify_signature_upload,
+    verify_sigstore_signature_upload,
+)
 from pulp_ansible.app.tasks.upload import process_collection_artifact, finish_collection_upload
 
 
@@ -127,15 +130,15 @@ class GitRemoteSerializer(RemoteSerializer):
             "git_ref",
         )
 
+
 class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     """
     A serializer for Sigstore signing services.
     """
 
     name = serializers.CharField(
-        help_text=_(
-            "A unique name used to recognize a Sigstore signing service")
-        )
+        help_text=_("A unique name used to recognize a Sigstore signing service")
+    )
     environment = serializers.ChoiceField(
         help_text=_(
             "Optional cloud environment where the Pulp server is deployed. "
@@ -153,7 +156,8 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         required=True,
         help_text=_(
             "The URL of the Rekor instance to use for logging signatures. "
-            "Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev) if not specified"
+            "Defaults to the Rekor public good instance URL "
+            "(https://rekor.sigstore.dev) if not specified"
         ),
     )
     fulcio_url = serializers.CharField(
@@ -161,7 +165,8 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         required=True,
         help_text=_(
             "The URL of the Fulcio instance for getting signing certificates. "
-            "Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev) if not specified"
+            "Defaults to the Fulcio public good instance URL "
+            "(https://fulcio.sigstore.dev) if not specified"
         ),
     )
     tuf_url = serializers.CharField(
@@ -169,48 +174,55 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         required=True,
         help_text=_(
             "The URL of the TUF metadata repository instance to use. "
-            "Defaults to the public TUF instance URL (https://sigstore-tuf-root.storage.googleapis.com/) if not specified. "
-        )
+            "Defaults to the public TUF instance URL "
+            "(https://sigstore-tuf-root.storage.googleapis.com/) if not specified. "
+        ),
     )
     rekor_root_pubkey = serializers.CharField(
-        help_text=_("A PEM-encoded root public key for Rekor itself"), 
+        help_text=_("A PEM-encoded root public key for Rekor itself"),
         allow_null=True,
         allow_blank=True,
-        required=False
+        required=False,
     )
     oidc_issuer = serializers.CharField(
         initial="https://oauth2.sigstore.dev",
         required=True,
         help_text=_(
-            "The OpenID Connect issuer to use for signing and to check for in the certificate's OIDC issuer extension. "
-            "Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth) if not specified."
-        ), 
+            "The OpenID Connect issuer to use for signing and to check "
+            "for in the certificate's OIDC issuer extension. "
+            "Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth) "
+            "if not specified."
+        ),
     )
     expected_identity_provider = serializers.CharField(
         initial="https://github.com/login/oauth",
         required=True,
-        help_text=_("The expected identity provider to find in the signing certificate to verify. "
-                    "Defaults to GitHub OAuth endpoint (https://github.com/login/oauth) if not specified."
+        help_text=_(
+            "The expected identity provider to find in the signing certificate to verify. "
+            "Defaults to GitHub OAuth endpoint (https://github.com/login/oauth) if not specified."
         ),
     )
     credentials_file_path = serializers.CharField(
         required=True,
         help_text=_(
-            "Path to the OIDC client ID and client secret file on the server to authentify to Sigstore."
-        )
+            "Path to the OIDC client ID and client secret file "
+            "on the server to authentify to Sigstore."
+        ),
     )
     ctfe = serializers.CharField(
-        help_text=_("A PEM-encoded public key for the CT log"), 
+        help_text=_("A PEM-encoded public key for the CT log"),
         allow_null=True,
         allow_blank=True,
         required=False,
     )
     cert_identity = serializers.CharField(
-        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"), 
-        required=True
+        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"),
+        required=True,
     )
     verify_offline = serializers.BooleanField(
-        help_text=_("Perform signature verification offline. Requires sigstore_bundle set to True."),
+        help_text=_(
+            "Perform signature verification offline. Requires sigstore_bundle set to True."
+        ),
         default=False,
     )
     sigstore_bundle = serializers.BooleanField(
@@ -222,7 +234,9 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         default=True,
     )
     disable_interactive = serializers.BooleanField(
-        help_text=_("Disable Sigstore's interactive browser flow. Defaults to 'true' if not specified."),
+        help_text=_(
+            "Disable Sigstore's interactive browser flow. Defaults to 'true' if not specified."
+        ),
         default=True,
     )
 
@@ -245,7 +259,8 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "set_keycloak",
             "disable_interactive",
         )
-        extra_kwargs = {'view_name': 'sigstore-signing-services-detail'}
+        extra_kwargs = {"view_name": "sigstore-signing-services-detail"}
+
 
 class AnsibleRepositorySerializer(RepositorySerializer):
     """
@@ -265,6 +280,7 @@ class AnsibleRepositorySerializer(RepositorySerializer):
         help_text=_("A signing service to use to sign the collections"),
         queryset=SigstoreSigningService.objects.all(),
     )
+
     class Meta:
         fields = RepositorySerializer.Meta.fields + (
             "last_synced_metadata_time",
@@ -273,6 +289,7 @@ class AnsibleRepositorySerializer(RepositorySerializer):
             "last_sync_task",
         )
         model = AnsibleRepository
+
 
 class AnsibleRepositorySyncURLSerializer(RepositorySyncURLSerializer):
     """
@@ -871,6 +888,7 @@ class CollectionVersionSignatureSerializer(NoArtifactContentUploadSerializer):
             "signing_service",
         )
 
+
 class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerializer):
     """
     A serializer for Sigstore signature models.
@@ -888,7 +906,8 @@ class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerial
         help_text=_("A Sigstore bundle used for offline verification."),
         allow_null=True,
         allow_blank=True,
-        max_length=10000, # Arbitrary length based on ~x2 the size of a typical Sigstore bundle content. TODO: Adjust.
+        # Arbitrary length based on ~x2 the size of a typical Sigstore bundle content.TODO: Adjust.
+        max_length=10000,
     )
     signed_collection = DetailRelatedField(
         help_text=_("The content this signature is pointing to."),
@@ -929,6 +948,7 @@ class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerial
             "signed_collection",
             "sigstore_signing_service",
         )
+
 
 class AnsibleNamespaceMetadataSerializer(NoArtifactContentSerializer):
     """
@@ -1115,6 +1135,7 @@ class AnsibleRepositorySignatureSerializer(serializers.Serializer):
             raise serializers.ValidationError("Cannot supply content units and '*'.")
         return value
 
+
 class AnsibleRepositorySigstoreSignatureSerializer(serializers.Serializer):
     """
     A serializer for the signing action using Sigstore.
@@ -1136,6 +1157,7 @@ class AnsibleRepositorySigstoreSignatureSerializer(serializers.Serializer):
         if len(value) > 1 and "*" in value:
             raise serializers.ValidationError("Cannot supply content units and '*'.")
         return value
+
 
 class CollectionImportListSerializer(serializers.ModelSerializer):
     """
