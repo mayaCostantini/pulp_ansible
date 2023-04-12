@@ -1,33 +1,20 @@
+"""
+Representation of Keycloak as an OIDC issuer.
+"""
+
 from sigstore.oidc import _OpenIDConfiguration
 from sigstore.oidc import IdentityError
 
 import logging
+import os
 import requests
 import time
 import urllib.parse
 import webbrowser
 
+from pulp_ansible.app.sigstore.exceptions import KeycloakException
+
 log = logging.getLogger(__name__)
-
-
-class SigstoreException(Exception):
-    """Base class for Sigstore related Exceptions."""
-
-
-class MissingSigstoreVerificationMaterialsException(SigstoreException):
-    """Exception for missing Sigstore signature verification materials."""
-
-
-class VerificationFailureException(SigstoreException):
-    """Exception raised when Sigstore failed to validate an artifact signature."""
-
-
-class MissingIdentityToken(SigstoreException):
-    """Exception raised during Sigstore signing when an OIDC identity token could not be found"""
-
-
-class KeycloakException(SigstoreException):
-    """Exception raised when an issue occurred with the current Keycloak instance."""
 
 
 class _KeycloakOpenIDConfiguration(_OpenIDConfiguration):
@@ -52,7 +39,7 @@ class Keycloak:
                 " URL should contain the current Keycloak realm to use for authentication."
             )
 
-        oidc_config_url = urllib.parse.urljoin(
+        oidc_config_url = os.path.join(
             keycloak_base_url, ".well-known/openid-configuration"
         )
 
@@ -60,6 +47,7 @@ class Keycloak:
         try:
             resp.raise_for_status()
         except requests.HTTPError as http_error:
+            log.error(http_error.response)
             raise KeycloakException from http_error
 
         try:
@@ -67,14 +55,14 @@ class Keycloak:
         except ValueError as exc:
             raise KeycloakException(f"Keycloak returned invalid configuration: {exc}")
 
-    def identity_token(self, client_id, client_secret, disable_interactive):
+    def identity_token(self, client_id, client_secret, enable_interactive):
         """Get an identity token from Keycloak token endpoint."""
         # interactive mode is taken from the original sigstore python
         # Issuer.identity_token() implementation at
         # https://github.com/sigstore/sigstore-python/blob/v1.1.0/sigstore/oidc.py#L100
         # This method works only on browser interaction and enables out-of-bond
         # only if the former method fails.
-        if not disable_interactive:
+        if enable_interactive:
             from sigstore._internal.oidc.oauth import _OAuthFlow
 
             code: str

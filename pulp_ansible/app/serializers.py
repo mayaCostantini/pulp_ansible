@@ -2,6 +2,7 @@ from gettext import gettext as _
 
 from django.db import transaction
 from django.conf import settings
+from drf_extra_fields.fields import Base64FileField
 from jsonschema import Draft7Validator
 from rest_framework import serializers
 from urllib.parse import urljoin
@@ -52,8 +53,8 @@ from pulp_ansible.app.tasks.utils import (
 )
 from pulp_ansible.app.tasks.signature import (
     verify_signature_upload,
-    verify_sigstore_signature_upload,
 )
+from pulp_ansible.app.sigstore.tasks.sigstore_signature import verify_sigstore_signature_upload
 from pulp_ansible.app.tasks.upload import process_collection_artifact, finish_collection_upload
 
 
@@ -135,21 +136,8 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     """
     A serializer for Sigstore signing services.
     """
-
     name = serializers.CharField(
         help_text=_("A unique name used to recognize a Sigstore signing service")
-    )
-    environment = serializers.ChoiceField(
-        help_text=_(
-            "Optional cloud environment where the Pulp server is deployed. "
-            "Used to faciliate identity token retrieval by Sigstore in cloud environments."
-        ),
-        choices=(
-            ("google_cloud_platform", _("Google Cloud Platform")),
-            ("amazon_web_services", _("Amazon Web Services")),
-        ),
-        allow_blank=True,
-        allow_null=True,
     )
     rekor_url = serializers.CharField(
         initial="https://rekor.sigstore.dev",
@@ -181,7 +169,6 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     rekor_root_pubkey = serializers.CharField(
         help_text=_("A PEM-encoded root public key for Rekor itself"),
         allow_null=True,
-        allow_blank=True,
         required=False,
     )
     oidc_issuer = serializers.CharField(
@@ -209,10 +196,9 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "on the server to authentify to Sigstore."
         ),
     )
-    ctfe = serializers.CharField(
+    ctfe_pubkey = serializers.CharField(
         help_text=_("A PEM-encoded public key for the CT log"),
         allow_null=True,
-        allow_blank=True,
         required=False,
     )
     cert_identity = serializers.CharField(
@@ -225,26 +211,17 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         ),
         default=False,
     )
-    sigstore_bundle = serializers.BooleanField(
-        help_text=_("Write a single Sigstore bundle file to the collection"),
-        default=False,
-    )
-    set_keycloak = serializers.BooleanField(
-        help_text=_("Set Keycloak as the OIDC issuer. Defaults to True."),
-        default=True,
-    )
-    disable_interactive = serializers.BooleanField(
+    enable_interactive = serializers.BooleanField(
         help_text=_(
-            "Disable Sigstore's interactive browser flow. Defaults to 'true' if not specified."
+            "Enable Sigstore's interactive browser flow. Defaults to 'false' if not specified."
         ),
-        default=True,
+        default=False,
     )
 
     class Meta:
         model = SigstoreSigningService
         fields = NoArtifactContentUploadSerializer.Meta.fields + (
             "name",
-            "environment",
             "rekor_url",
             "fulcio_url",
             "tuf_url",
@@ -252,12 +229,10 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "oidc_issuer",
             "expected_identity_provider",
             "credentials_file_path",
-            "ctfe",
+            "ctfe_pubkey",
             "cert_identity",
             "verify_offline",
-            "sigstore_bundle",
-            "set_keycloak",
-            "disable_interactive",
+            "enable_interactive",
         )
         extra_kwargs = {"view_name": "sigstore-signing-services-detail"}
 

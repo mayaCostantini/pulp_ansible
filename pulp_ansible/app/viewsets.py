@@ -1,7 +1,10 @@
+import base64
+
 from gettext import gettext as _
 
 from django.contrib.postgres.search import SearchQuery
-from django.db.models import fields as db_fields
+from django.core.files.base import ContentFile
+from django.db.models import fields as db_fields, Q
 from django.db.models.expressions import F, Func
 from django_filters import filters
 from drf_spectacular.utils import extend_schema
@@ -78,9 +81,10 @@ from .tasks.collections import rebuild_repository_collection_versions_metadata
 from .tasks.copy import copy_content
 from .tasks.roles import synchronize as role_sync
 from .tasks.git import synchronize as git_sync
-from .tasks.signature import sign, sigstore_sign
+from .tasks.signature import sign
 from .tasks.mark import mark, unmark
 
+from .sigstore.tasks.sigstore_signature import sigstore_sign
 
 class RoleFilter(ContentFilter):
     """
@@ -236,10 +240,6 @@ class SigstoreSignatureFilter(ContentFilter):
     signed_collection = HyperlinkRelatedFilter(
         field_name="signed_collection", help_text=_("Filter signatures for collection version")
     )
-    sigstore_x509_certificate_sha256_digest = HyperlinkRelatedFilter(
-        field_name="x509_certificate_sha256_digest",
-        help_text=_("Filter Sigstore signatures by X509 signing certificate sha 256 digest"),
-    )
     sigstore_signing_service = HyperlinkRelatedFilter(
         field_name="sigstore_signing_service",
         help_text=_("Filter Sigstore signatures produced by Sigstore Signing Service"),
@@ -249,7 +249,7 @@ class SigstoreSignatureFilter(ContentFilter):
         model = CollectionVersionSigstoreSignature
         fields = {
             "signed_collection": ["exact"],
-            "sigstore_x509_certificate_sha256_digest": ["exact", "in"],
+            "sigstore_x509_certificate": ["exact", "in"],
             "sigstore_signing_service": ["exact"],
         }
 
