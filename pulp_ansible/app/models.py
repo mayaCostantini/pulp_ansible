@@ -403,6 +403,7 @@ class SigstoreSigningService(Content):
     def rekor_public_keys(self):
         """Get the Rekor instance public key."""
         if self.rekor_root_pubkey:
+            print("HERE")
             return bytes(self.rekor_root_pubkey, "utf-8")
         return self.trust_updater.get_rekor_keys()
         
@@ -566,7 +567,10 @@ class SigstoreSigningService(Content):
             delimiter = "-----"
             s = pubkey.split(delimiter)
             return delimiter + s[1] + delimiter + s[2].replace(" ", "\n") + delimiter + s[3] + delimiter
-        self.ctfe_pubkey, self.rekor_root_pubkey = format(self.ctfe_pubkey), format(self.rekor_root_pubkey)
+        if self.ctfe_pubkey:
+            self.ctfe_pubkey = format(self.ctfe_pubkey)
+        if self.rekor_root_pubkey:
+            self.rekor_root_pubkey = format(self.rekor_root_pubkey)
         super(SigstoreSigningService, self).save(*args, **kwargs)
 
     class Meta:
