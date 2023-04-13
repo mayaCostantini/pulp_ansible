@@ -362,7 +362,7 @@ class SigstoreSigningService(Content):
             Defaults to False if not specified.
     """
 
-    TYPE = "sigstore_signing_services"
+    TYPE = "sigstore_signing_service"
 
     PUBLIC_OIDC_ISSUERS = (
         "https://accounts.google.com",
@@ -395,21 +395,25 @@ class SigstoreSigningService(Content):
     @property
     def ctfe_public_keys(self):
         """Get the CTFE public keys."""
+        if self.ctfe_pubkey:
+            return bytes(self.ctfe_pubkey, "utf-8")
         return self.trust_updater.get_ctfe_keys()
 
     @property
     def rekor_public_keys(self):
         """Get the Rekor instance public key."""
+        if self.rekor_root_pubkey:
+            return bytes(self.rekor_root_pubkey, "utf-8")
         return self.trust_updater.get_rekor_keys()
-
+        
     @property
     def rekor(self):
         """Get a Rekor instance."""
         if self.rekor_url == self.PUBLIC_REKOR_URL:
             return RekorClient.production(self.trust_updater)
 
-        rekor_key = RekorKeyring(Keyring(self.rekor_public_keys))
-        ctfe_key =  CTKeyring(Keyring(self.ctfe_public_keys))
+        rekor_key = RekorKeyring(Keyring([self.rekor_public_keys]))
+        ctfe_key =  CTKeyring(Keyring([self.ctfe_public_keys]))
         return RekorClient(
             self.rekor_url,
             rekor_key,
@@ -501,7 +505,7 @@ class SigstoreSigningService(Content):
             },
         }
 
-        rekor_post_entries_url = urljoin(self.rekor.url, "entries/")
+        rekor_post_entries_url = urljoin(self.rekor.url, "log/entries/")
         
         async with aiohttp.ClientSession(
             headers={"Content-Type": "application/json", "Accept": "application/json"}
@@ -555,6 +559,15 @@ class SigstoreSigningService(Content):
             issuer=self.expected_identity_provider,
         )
         return self.verifier.verify(materials=verification_materials, policy=policy)
+
+    def save(self, *args, **kwargs):
+        """Override the base `save` method to properly format PEM-encoded files."""
+        def format(pubkey):
+            delimiter = "-----"
+            s = pubkey.split(delimiter)
+            return delimiter + s[1] + delimiter + s[2].replace(" ", "\n") + delimiter + s[3] + delimiter
+        self.ctfe_pubkey, self.rekor_root_pubkey = format(self.ctfe_pubkey), format(self.rekor_root_pubkey)
+        super(SigstoreSigningService, self).save(*args, **kwargs)
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"

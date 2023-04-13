@@ -169,6 +169,7 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     rekor_root_pubkey = serializers.CharField(
         help_text=_("A PEM-encoded root public key for Rekor itself"),
         allow_null=True,
+        allow_blank=True,
         required=False,
     )
     oidc_issuer = serializers.CharField(
@@ -199,6 +200,7 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     ctfe_pubkey = serializers.CharField(
         help_text=_("A PEM-encoded public key for the CT log"),
         allow_null=True,
+        allow_blank=True,
         required=False,
     )
     cert_identity = serializers.CharField(
