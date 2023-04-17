@@ -44,6 +44,7 @@ from .models import (
     CollectionRemote,
     Role,
     SigstoreSigningService,
+    SigstoreVerifyingService,
     Tag,
 )
 from pulp_ansible.app.schema import COPY_CONFIG_SCHEMA
@@ -137,7 +138,8 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
     A serializer for Sigstore signing services.
     """
     name = serializers.CharField(
-        help_text=_("A unique name used to recognize a Sigstore signing service")
+        help_text=_("A unique name used to recognize a Sigstore signing service"),
+        required=True,
     )
     rekor_url = serializers.CharField(
         initial="https://rekor.sigstore.dev",
@@ -182,14 +184,6 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "if not specified."
         ),
     )
-    expected_identity_provider = serializers.CharField(
-        initial="https://github.com/login/oauth",
-        required=True,
-        help_text=_(
-            "The expected identity provider to find in the signing certificate to verify. "
-            "Defaults to GitHub OAuth endpoint (https://github.com/login/oauth) if not specified."
-        ),
-    )
     credentials_file_path = serializers.CharField(
         required=True,
         help_text=_(
@@ -202,16 +196,6 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
         allow_null=True,
         allow_blank=True,
         required=False,
-    )
-    cert_identity = serializers.CharField(
-        help_text=_("The OIDC identity of the signer present as the SAN in the X509 certificate"),
-        required=True,
-    )
-    verify_offline = serializers.BooleanField(
-        help_text=_(
-            "Perform signature verification offline. Requires sigstore_bundle set to True."
-        ),
-        default=False,
     )
     enable_interactive = serializers.BooleanField(
         help_text=_(
@@ -229,14 +213,74 @@ class SigstoreSigningServiceSerializer(NoArtifactContentUploadSerializer):
             "tuf_url",
             "rekor_root_pubkey",
             "oidc_issuer",
-            "expected_identity_provider",
             "credentials_file_path",
             "ctfe_pubkey",
-            "cert_identity",
-            "verify_offline",
             "enable_interactive",
         )
         extra_kwargs = {"view_name": "sigstore-signing-services-detail"}
+
+
+class SigstoreVerifyingServiceSerializer(NoArtifactContentUploadSerializer):
+    """
+    A serializer for Sigstore verifying services.
+    """
+    name = serializers.CharField(
+        help_text=_("A unique name used to recognize a Sigstore verifying service"),
+        required=True,
+    )
+    rekor_url = serializers.CharField(
+        initial="https://rekor.sigstore.dev",
+        required=True,
+        help_text=_(
+            "The URL of the Rekor instance to use for verifying signature logs"
+        ),
+    )
+    rekor_root_pubkey = serializers.CharField(
+        help_text=_("A PEM-encoded root public key for Rekor itself"),
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+    )
+    certificate_chain = serializers.CharField(
+        help_text=_(
+            "A list of PEM-encoded CA certificates needed to build the Fulcio signing certificate chain."
+        ),
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+    )
+    expected_oidc_issuer = serializers.CharField(
+        help_text=_(
+            "The expected OIDC issuer in the signing certificate."
+        ),
+        required=True,
+    )
+    expected_identity = serializers.CharField(
+        help_text=_(
+            "The expected identity in the signing certificate."
+        ),
+        required=True,
+    )
+    verify_offline = serializers.BooleanField(
+        help_text=_(
+            "Verify the signature offline."
+        ),
+        required=False,
+        default=False,
+    )
+
+    class Meta:
+        model = SigstoreVerifyingService
+        fields = NoArtifactContentUploadSerializer.Meta.fields + (
+            "name",
+            "rekor_url",
+            "rekor_root_pubkey",
+            "certificate_chain",
+            "expected_oidc_issuer",
+            "expected_identity",
+            "verify_offline",
+        )
+        extra_kwargs = {"view_name": "sigstore-verifying-services-detail"}
 
 
 class AnsibleRepositorySerializer(RepositorySerializer):
@@ -254,8 +298,12 @@ class AnsibleRepositorySerializer(RepositorySerializer):
         allow_null=True,
     )
     sigstore_signing_service = DetailRelatedField(
-        help_text=_("A signing service to use to sign the collections"),
+        help_text=_("A Sigstore service to use to sign the collections"),
         queryset=SigstoreSigningService.objects.all(),
+    )
+    sigstore_verifying_service = DetailRelatedField(
+        help_text=_("A Sigstore service used to verify the collection signatures"),
+        queryset=SigstoreVerifyingService.objects.all(),
     )
 
     class Meta:
@@ -263,6 +311,7 @@ class AnsibleRepositorySerializer(RepositorySerializer):
             "last_synced_metadata_time",
             "gpgkey",
             "sigstore_signing_service",
+            "sigstore_verifying_service",
             "last_sync_task",
         )
         model = AnsibleRepository
@@ -879,12 +928,9 @@ class CollectionVersionSigstoreSignatureSerializer(NoArtifactContentUploadSerial
         help_text=_("The ephemeral PEM-encoded signing certificate generated by Sigstore."),
         required=True,
     )
-    sigstore_bundle = serializers.CharField(
+    sigstore_bundle = serializers.JSONField(
         help_text=_("A Sigstore bundle used for offline verification."),
         allow_null=True,
-        allow_blank=True,
-        # Arbitrary length based on ~x2 the size of a typical Sigstore bundle content.TODO: Adjust.
-        max_length=10000,
     )
     signed_collection = DetailRelatedField(
         help_text=_("The content this signature is pointing to."),
