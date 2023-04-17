@@ -51,6 +51,7 @@ from .models import (
     CollectionRemote,
     Role,
     SigstoreSigningService,
+    SigstoreVerifyingService,
     Tag,
 )
 from .serializers import (
@@ -74,6 +75,7 @@ from .serializers import (
     CopySerializer,
     RoleSerializer,
     SigstoreSigningServiceSerializer,
+    SigstoreVerifyingServiceSerializer,
     TagSerializer,
 )
 from .tasks.collections import sync as collection_sync
@@ -262,6 +264,17 @@ class SigstoreSigningServiceViewSet(NoArtifactContentUploadViewSet):
     endpoint_name = "sigstore_signing_services"
     queryset = SigstoreSigningService.objects.all()
     serializer_class = SigstoreSigningServiceSerializer
+    filterset_fields = ["name"]
+
+
+class SigstoreVerifyingServiceViewSet(NoArtifactContentUploadViewSet):
+    """
+    Viewset for looking at Sigstore verifying services.
+    """
+
+    endpoint_name = "sigstore_verifying_services"
+    queryset = SigstoreVerifyingService.objects.all()
+    serializer_class = SigstoreVerifyingServiceSerializer
     filterset_fields = ["name"]
 
 
