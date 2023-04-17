@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import requests
 import tempfile
 
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives import (
 )
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
+from cryptography.x509 import load_pem_x509_certificates
 from gettext import gettext as _
 
 from logging import getLogger
@@ -19,7 +21,7 @@ from logging import getLogger
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import models
-from django.db.models import UniqueConstraint, Q
+from django.db.models import JSONField, UniqueConstraint, Q
 from django.db.utils import IntegrityError
 from django.contrib.postgres import fields as psql_fields
 from django.contrib.postgres import search as psql_search
@@ -317,7 +319,7 @@ class CollectionVersionSignature(Content):
 
 class SigstoreSigningService(Content):
     """
-    An object to generate Sigstore signatures for a given file.
+    A service to generate Sigstore signatures for a given CollectionVersion.
     Distinct from SigningService objects used to sign artifacts using GPG
     (does not call an external script provided by the user, but still needs to be registered).
 
@@ -326,26 +328,19 @@ class SigstoreSigningService(Content):
             Name of the Sigstore signing service.
         rekor_url (models.TextField):
             The URL of the Rekor instance to use for logging signatures.
-            Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev)
-            if not specified.
+            Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev).
         rekor_root_pubkey (models.TextField):
             A PEM-encoded root public key for Rekor itself.
         fulcio_url (models.TextField):
             The URL of the Fulcio instance to use for getting signing certificates.
-            Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev)
-            if not specified.
+            Defaults to the Fulcio public good instance URL (https://fulcio.sigstore.dev).
         tuf_url (models.TextField):
             The URL of the TUF metadata repository instance to use.
             Defaults to the public TUF instance URL
-            (https://sigstore-tuf-root.storage.googleapis.com/) if not specified.
+            (https://sigstore-tuf-root.storage.googleapis.com/).
         oidc_issuer (models.TextField):
             The OpenID Connect issuer to use for signing.
-            Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth)
-            if not specified.
-        expected_identity_provider (models.TextField):
-            The expected identity provider to find in the signing certificate to verify.
-            Defaults to GitHub OAuth endpoint (https://github.com/login/oauth)
-            if not specified.
+            Defaults to the public OAuth2 server URL (https://oauth2.sigstore.dev/auth).
         credentials_file_path (models.TextField):
             Path to the OIDC client ID and client secret file on the server
             to authentify to Sigstore.
@@ -354,12 +349,9 @@ class SigstoreSigningService(Content):
         cert_identity (models.TextField):
             A unique identity string corresponding to the OIDC identity
             present as the SAN in the X509 certificate.
-        verify_offline (models.BooleanField):
-            Perform signature verification offline.
-            Defaults to False if not specified.
         enable_interactive (models.BooleanField):
             Enable Sigstore's interactive browser flow.
-            Defaults to False if not specified.
+            Defaults to False.
     """
 
     TYPE = "sigstore_signing_service"
@@ -380,11 +372,8 @@ class SigstoreSigningService(Content):
     fulcio_url = models.TextField(default=PUBLIC_FULCIO_URL)
     tuf_url = models.TextField(default=PUBLIC_TUF_URL)
     oidc_issuer = models.TextField(default=PUBLIC_ISSUER_URL)
-    expected_identity_provider = models.TextField(default="https://github.com/login/oauth")
     credentials_file_path = models.TextField(null=True)
     ctfe_pubkey = models.TextField(null=True)
-    cert_identity = models.TextField()  # There is theoretically no limit to the size of an X509 certificate SAN.
-    verify_offline = models.BooleanField(null=True, default=False)
     enable_interactive = models.BooleanField(default=False)
 
     @property
@@ -403,7 +392,6 @@ class SigstoreSigningService(Content):
     def rekor_public_keys(self):
         """Get the Rekor instance public key."""
         if self.rekor_root_pubkey:
-            print("HERE")
             return bytes(self.rekor_root_pubkey, "utf-8")
         return self.trust_updater.get_rekor_keys()
         
@@ -414,7 +402,7 @@ class SigstoreSigningService(Content):
             return RekorClient.production(self.trust_updater)
 
         rekor_key = RekorKeyring(Keyring([self.rekor_public_keys]))
-        ctfe_key =  CTKeyring(Keyring([self.ctfe_public_keys]))
+        ctfe_key = CTKeyring(Keyring([self.ctfe_public_keys]))
         return RekorClient(
             self.rekor_url,
             rekor_key,
@@ -432,11 +420,6 @@ class SigstoreSigningService(Content):
     def trust_updater(self):
         """Get a custom TrustUpdater instance depending on the TUF metadata repository provided."""
         return TrustUpdater(self.tuf_url)
-
-    @property
-    def verifier(self):
-        """Get a Verifier instance."""
-        return Verifier.production()
 
     @property
     def signer(self):
@@ -537,30 +520,6 @@ class SigstoreSigningService(Content):
 
         return signing_result
 
-    def sigstore_verify(self, sha256sumfile, sha256sumsig, sha256sumcert, entry, sigstore_bundle=None):
-        """Verify a Sigstore signature validity."""
-        if self.verify_offline and not sigstore_bundle:
-            raise ValueError("Offline verification requires a Sigstore bundle.")
-
-        if self.verify_offline and sigstore_bundle:
-            verification_materials = VerificationMaterials.from_bundle(
-                input_=sha256sumfile, bundle=sigstore_bundle, offline=True
-            )
-        else:
-            verification_materials = VerificationMaterials(
-                input_=sha256sumfile,
-                cert_pem=sha256sumcert,
-                signature=sha256sumsig,
-                rekor_entry=entry,
-                offline=False,
-            )
-
-        policy = Identity(
-            identity=self.cert_identity,
-            issuer=self.expected_identity_provider,
-        )
-        return self.verifier.verify(materials=verification_materials, policy=policy)
-
     def save(self, *args, **kwargs):
         """Override the base `save` method to properly format PEM-encoded files."""
         def format(pubkey):
@@ -577,6 +536,126 @@ class SigstoreSigningService(Content):
         default_related_name = "%(app_label)s_%(model_name)s"
 
 
+class SigstoreVerifyingService(Content):
+    """
+    A service to verify a CollectionVersion Sigstore signature.
+
+    Fields:
+        name (models.CharField):
+            Name of the Sigstore verifying service.
+        rekor_url (models.TextField):
+            The URL of the Rekor instance to use for checking signature logs.
+            Defaults to the Rekor public good instance URL (https://rekor.sigstore.dev).
+        rekor_root_pubkey (models.TextField):
+            A PEM-encoded root public key for Rekor itself.
+            Defaults to None.
+        certificate_chain (models.TextField):
+            A list of PEM-encoded CA certificates needed to build the Fulcio signing certificate chain.
+            Defaults to None.
+        expected_oidc_issuer (models.TextField):
+            The expected OIDC issuer in the signing certificate.
+        expected_identity (models.TextField):
+            The expected identity in the signing certificate.
+        verify_offline (models.BooleanField):
+            Verify the signature offline.
+            Needs the presence of a Sigstore bundle in the verification materials.
+    """
+
+    TYPE = "sigstore_verifying_service"
+
+    # TODO: dedupe public URL
+
+    PUBLIC_REKOR_URL = "https://rekor.sigstore.dev"
+
+    name = models.CharField(db_index=True, unique=True, max_length=64)
+    rekor_url = models.TextField(default=PUBLIC_REKOR_URL)
+    rekor_root_pubkey = models.TextField(null=True)
+    certificate_chain = models.TextField(null=True)
+    expected_oidc_issuer = models.TextField()
+    expected_identity = models.TextField()
+    verify_offline = models.BooleanField(null=True, default=False)
+
+    @property
+    def rekor_public_keys(self):
+        """Get the Rekor instance public key."""
+        if self.rekor_root_pubkey:
+            return bytes(self.rekor_root_pubkey, "utf-8")
+        return self.trust_updater.get_rekor_keys()
+
+    @property
+    def rekor(self):
+        """Get a Rekor instance."""
+        if self.rekor_url == self.PUBLIC_REKOR_URL:
+            return RekorClient.production(self.trust_updater)
+
+        rekor_key = RekorKeyring(Keyring([self.rekor_public_keys]))
+        ctfe_key = CTKeyring(Keyring())
+        return RekorClient(
+            self.rekor_url,
+            rekor_key,
+            ctfe_key,
+        )
+
+    @property
+    def certificates_chain(self):
+        """Get the Fulcio certificate chain."""
+        with tempfile.NamedTemporaryFile(dir=".", delete=False, mode="w") as certificates_file:
+            certificates_file.write(self.certificate_chain)
+            certificates_file.flush()
+        with open(certificates_file.name, "rb") as bcertificates_file:
+            return load_pem_x509_certificates(bcertificates_file.read())
+
+    @property
+    def verifier(self):
+        """Get a Verifier instance."""
+        return Verifier(
+            rekor=self.rekor,
+            fulcio_certificate_chain=self.certificates_chain,
+        )
+
+    def sigstore_verify(self, manifest, signature, certificate, sigstore_bundle=None):
+        """Verify a Sigstore signature validity."""
+        if self.verify_offline and not sigstore_bundle:
+            raise ValueError(
+                "Offline verification requires a Sigstore bundle."
+            )
+
+        if self.verify_offline and sigstore_bundle:
+            verification_materials = VerificationMaterials.from_bundle(
+                input_=manifest, bundle=sigstore_bundle, offline=True
+            )
+        else:
+            verification_materials = VerificationMaterials(
+                input_=manifest,
+                cert_pem=certificcate,
+                signature=signature,
+                offline=False,
+            )
+
+        policy = Identity(
+            identity=self.expected_identity,
+            issuer=self.expected_oidc_issuer,
+        )
+        return self.verifier.verify(materials=verification_materials, policy=policy)
+
+    def save(self, *args, **kwargs):
+        """Override the base `save` method to properly format PEM-encoded files."""
+        def format(pubkey):
+            delimiter = "-----"
+            s = pubkey.split(delimiter)
+            res = delimiter + s[1] + delimiter +re.sub(' +', '\n', s[2]) + delimiter + s[3] + delimiter
+            return res
+        
+        if self.certificate_chain:
+            self.certificate_chain = format(self.certificate_chain)
+        if self.rekor_root_pubkey:
+            self.rekor_root_pubkey = format(self.rekor_root_pubkey)
+        super(SigstoreVerifyingService, self).save(*args, **kwargs)
+
+    class Meta:
+        default_related_name = "%(app_label)s_%(model_name)s"
+
+
 class CollectionVersionSigstoreSignature(Content):
     """
     A content type representing a Sigstore signature attached to a content unit.
@@ -586,7 +665,7 @@ class CollectionVersionSigstoreSignature(Content):
             A signature, base64 encoded.
         sigstore_x509_certificate (models.TextField):
             The ephemeral PEM-encoded signing certificate generated by Sigstore.
-        sigstore_bundle (models.TextField):
+        sigstore_bundle (models.JSONField):
             An optional Sigstore bundle used for offline verification.
 
     Relations:
@@ -600,7 +679,7 @@ class CollectionVersionSigstoreSignature(Content):
 
     data = models.CharField(max_length=256)
     sigstore_x509_certificate = models.TextField()
-    sigstore_bundle = models.TextField(null=True)
+    sigstore_bundle = models.JSONField(null=True)
     signed_collection = models.ForeignKey(
         CollectionVersion, on_delete=models.CASCADE, related_name="sigstore_signatures"
     )
@@ -814,7 +893,9 @@ class AnsibleRepository(Repository):
     Relations:
 
         sistore_signing_service (models.ForeignKey):
-            Sigstore Signing Service used to sign and verify collections.
+            Sigstore service used to sign collections.
+        sigstore_verifying_service (models.ForeignKey):
+            Sigstore service used to verify collection signatures.
     """
 
     TYPE = "ansible"
@@ -833,6 +914,12 @@ class AnsibleRepository(Repository):
     gpgkey = models.TextField(null=True)
     sigstore_signing_service = models.ForeignKey(
         SigstoreSigningService,
+        on_delete=models.SET_NULL,
+        related_name="ansible_repositories",
+        null=True,
+    )
+    sigstore_verifying_service = models.ForeignKey(
+        SigstoreVerifyingService,
         on_delete=models.SET_NULL,
         related_name="ansible_repositories",
         null=True,
