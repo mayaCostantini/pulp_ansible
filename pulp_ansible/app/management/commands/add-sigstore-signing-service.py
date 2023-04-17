@@ -11,36 +11,18 @@ from voluptuous import Optional, Required, Schema
 
 from pulp_ansible.app.models import SigstoreSigningService
 
-SIGSTORE_GLOBAL_OPTIONS_SCHEMA = Schema(
+
+SIGSTORE_CONFIGURATION_FILE_SCHEMA = Schema(
     {
         Required("name"): str,
         Optional("rekor-url"): str,
         Optional("tuf-url"): str,
         Optional("rekor-root-pubkey"): str,
-    }
-)
-SIGSTORE_SIGN_SCHEMA = Schema(
-    {
         Optional("fulcio-url"): str,
         Optional("oidc-issuer"): str,
         Optional("ctfe-pubkey"): str,
         Optional("credentials-file-path"): str,
         Optional("enable-interactive"): bool,
-    }
-)
-SIGSTORE_VERIFY_SCHEMA = Schema(
-    {
-        Required("expected-identity-provider"): str,
-        Required("cert-identity"): str,
-        Optional("verify-offline"): bool,
-    }
-)
-
-SIGSTORE_CONFIGURATION_FILE_SCHEMA = Schema(
-    {
-        Required("global-options"): SIGSTORE_GLOBAL_OPTIONS_SCHEMA,
-        Required("sign-options"): SIGSTORE_SIGN_SCHEMA,
-        Required("verify-options"): SIGSTORE_VERIFY_SCHEMA,
     }
 )
 
@@ -66,40 +48,38 @@ class Command(BaseCommand):
     help = "Adds a new Sigstore signing service. [tech-preview]"
 
     def add_arguments(self, parser):
-        global_options = parser.add_argument_group("Global Sigstore options")
-        global_options.add_argument(
+        sign_options = parser.add_argument_group("Sign options")
+        sign_options.add_argument(
             "--from-file",
             help=_("Load the Sigstore configuration from a JSON file. File configuration can be overriden by specified arguments.\n"),
         )
-        global_options.add_argument(
+        sign_options.add_argument(
             "--name",
             type=str,
             metavar="NAME",
             help=_("Name for registering the Sigstore signing service.\n"),
         )
-        global_options.add_argument(
+        sign_options.add_argument(
             "--rekor-url",
             metavar="URL",
             type=str,
             default="https://rekor.sigstore.dev",
             help=_("The Rekor instance to use. WARNING: defaults to the public good Sigstore instance https://rekor.sigstore.dev"),
         )
-        global_options.add_argument(
+        sign_options.add_argument(
             "--tuf-url",
             metavar="URL",
             type=str,
             default="https://sigstore-tuf-root.storage.googleapis.com/",
             help=_("The TUF repository to use. WARNING: defaults to the public TUF metadata repository https://sigstore-tuf-root.storage.googleapis.com/"),
         )
-        global_options.add_argument(
+        sign_options.add_argument(
             "--rekor-root-pubkey",
             metavar="FILE",
             type=argparse.FileType("rb"),
             help=_("A PEM-encoded root public key for Rekor itself"),
             default=None,
         )
-
-        sign_options = parser.add_argument_group("Sign options")
         sign_options.add_argument(
             "--fulcio-url",
             metavar="URL",
@@ -112,7 +92,7 @@ class Command(BaseCommand):
             metavar="URL",
             type=str,
             default="https://oauth2.sigstore.dev",
-            help=_("The OpenID Connect issuer to use to sign and verify the artifact"),
+            help=_("The OpenID Connect issuer to use to sign the artifact"),
         )
         sign_options.add_argument(
             "--ctfe-pubkey",
@@ -134,27 +114,6 @@ class Command(BaseCommand):
             help=_("Enable Sigstore's interactive browser flow. Defaults to False."),
         )
 
-        verify_options = parser.add_argument_group("Verify options")
-        verify_options.add_argument(
-            "--expected-identity-provider",
-            metavar="URL",
-            type=str,
-            default=os.getenv("SIGSTORE_EXPECTED_OIDC_PROVIDER"),
-            help=_("The OIDC issuer URL to check for in the certificate's OIDC issuer extension"),
-        )
-        verify_options.add_argument(
-            "--cert-identity",
-            metavar="IDENTITY",
-            type=str,
-            default=os.getenv("SIGSTORE_CERT_IDENTITY"),
-            help=_("The identity to check for in the certificate's Subject Alternative Name"),
-        )
-        verify_options.add_argument(
-            "--verify-offline",
-            metavar="BOOL",
-            type=bool,
-            help=_("Perform offline signature verification. Requires a Sigstore bundle as a verification input.")
-        )
 
     def handle(self, *args, **options):
         if "from_file" in options:
@@ -163,51 +122,37 @@ class Command(BaseCommand):
             with open(file_path, "r") as file:
                 sigstore_config = json.load(file)
                 SIGSTORE_CONFIGURATION_FILE_SCHEMA(sigstore_config)
-                global_sigstore_options, sign_options, verify_options = sigstore_config["global-options"], sigstore_config["sign-options"], sigstore_config["verify-options"]
+                sign_options = sigstore_config["sign-options"]
                 options = {option_name.replace("_", "-") : option_value for option_name, option_value in options.items()}
                 for option_name, option_value in options.items():
                     if option_value:
-                        if option_name in global_sigstore_options:
-                            global_sigstore_options[option_name] = option_value
-                        elif option_name in sign_options:
-                            sign_options[option_name] = option_value
-                        elif option_name in verify_options:
-                            verify_options[option_name] = option_value
+                        sign_options[option_name] = option_value
 
                 enable_interactive = _to_bool(sign_options["enable-interactive"])
-                verify_offline = _to_bool(verify_options["verify-offline"])
-                if verify_offline:
-                    print("WARNING: Offline verification needs a Sigstore bundle in the verification materials.")
 
                 try:
                     SigstoreSigningService.objects.create(
-                        name=global_sigstore_options["name"],
-                        rekor_url=global_sigstore_options.get("rekor-url"),
+                        name=sign_options["name"],
+                        rekor_url=sign_options.get("rekor-url"),
                         oidc_issuer=sign_options.get("oidc-issuer"),
-                        tuf_url=global_sigstore_options.get("tuf-url"),
-                        rekor_root_pubkey=global_sigstore_options.get("rekor-root-pubkey"),
+                        tuf_url=sign_options.get("tuf-url"),
+                        rekor_root_pubkey=sign_options.get("rekor-root-pubkey"),
                         fulcio_url=sign_options.get("fulcio-url"),
                         ctfe_pubkey=sign_options.get("ctfe-pubkey"),
                         credentials_file_path=sign_options.get("credentials-file-path"),
                         enable_interactive=enable_interactive,
-                        expected_identity_provider=verify_options["expected-identity-provider"],
-                        cert_identity=verify_options["cert-identity"],
-                        verify_offline=verify_offline,
                     )
 
                     print(
-                        f"Successfully configured the Sigstore signing service {global_sigstore_options['name']} with the following parameters: \n"
-                        f"Rekor instance URL: {global_sigstore_options['rekor-url']}\n"
+                        f"Successfully configured the Sigstore signing service {sign_options['name']} with the following parameters: \n"
+                        f"Rekor instance URL: {sign_options['rekor-url']}\n"
                         f"OIDC issuer: {sign_options.get('oidc-issuer')}\n"
-                        f"TUF repository metadata URL: {global_sigstore_options['tuf-url']}\n"
-                        f"Rekor root public key: {global_sigstore_options.get('rekor-root-pubkey')}\n"
+                        f"TUF repository metadata URL: {sign_options['tuf-url']}\n"
+                        f"Rekor root public key: {sign_options.get('rekor-root-pubkey')}\n"
                         f"Fulcio instance URL: {sign_options['fulcio-url']}\n"
                         f"Certificate Transparency log public key: {sign_options.get('ctfe-pubkey')}\n"
                         f"OIDC credentials file path: {sign_options['credentials-file-path']}\n"
                         f"Enable interactive signing: {enable_interactive}\n"
-                        f"OIDC identity of the signer: {verify_options['expected-identity-provider']}\n"
-                        f"Expected signer identity in the signing certificate: {verify_options['cert-identity']}\n"
-                        f"Require offline verification: {verify_offline}\n"
                     )
 
                 except IntegrityError as e:
