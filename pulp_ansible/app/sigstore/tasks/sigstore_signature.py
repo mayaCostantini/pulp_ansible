@@ -64,68 +64,89 @@ from pulp_ansible.app.models import (
 log = logging.getLogger(__name__)
 
 
+def _generate_checksum_manifest(cartifact):
+    """
+    Generate a file containing the sha256 hashes of all the collection elements.
+    """
+    artifact_name = cartifact.artifact.file.name
+    artifact_file = storage.open(artifact_name)
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        differ = DistlibManifestChecksumFileExistenceDiffer
+        checksum = ChecksumFile(tempdir, differ=differ)
+        with tarfile.open(fileobj=artifact_file, mode="r") as tar:
+            tar.extractall(path=tempdir)
+
+            try:
+                manifest = checksum.generate_gnu_style()
+
+            except FileNotFoundError as e:
+                if os.path.islink(e.filename):
+                    log.error(f"Broken symlink found at {e.filename} -- this is not supported. Aborting.")
+                if e.filename.endswith("/MANIFEST.in"):
+                    log.error("Could not find a MANIFEST.in file in the specified project.")
+                    log.info("If you are attempting to sign a project, please create this file.")
+                    log.info("See the ansible-sign documentation for more information.")
+                raise e
+
+            except DistlibException as e:
+                log.error(f"An error was encountered while parsing MANIFEST.in: {e}")
+                raise e
+
+            for warning in checksum.warnings:
+                log.warn(warning)
+            log.debug(
+                "Full calculated checksum manifest (%s):\n%s",
+                manifest,
+            )
+            return manifest
+
+
 def verify_sigstore_signature_upload(data):
     # Check that the provided signature materials correspond to the collection content on upload.
     """The task code for verifying Sigstore signature upload."""
     collection = data["signed_collection"]
     repository = data.get("repository")
     if repository:
-        sigstore_signing_service = repository.sigstore_signing_service
+        sigstore_verifying_service = repository.sigstore_verifying_service
     else:
         raise ValueError(
             "This content type must be associated with a repository."
         )
-    artifact = collection.contentartifact_set.select_related("artifact").first().artifact.file.name
-    artifact_file = storage.open(artifact)
-    with tarfile.open(fileobj=artifact_file, mode="r") as tar:
+    signature = data["data"]
+    certificate = data["sigstore_x509_certificate"]
+    sigstore_bundle = data.get("sigstore_bundle")
+    cartifact = collection.contentartifact_set.select_related("artifact").first()
+    checksums = _generate_checksum_manifest(cartifact)
+
+    if sigstore_bundle:
+        bundle = Bundle().from_json(sigstore_bundle)
+
+    with tempfile.NamedTemporaryFile(dir=".", delete=False, mode="w") as manifest_file:
+        manifest_file.write(checksums)
+        manifest_file.flush()
+    with open(manifest_file.name, "rb", buffering=0) as manifest_io:
         try:
-            sha256sumfile = get_file_obj_from_tarball(
-                tar, ".ansible-sign/sha256sum.txt", artifact_file
+            verification_result = sigstore_verifying_service.sigstore_verify(
+                manifest=manifest_io,
+                signature=signature,
+                certificate=certificate,
+                sigstore_bundle=bundle,
             )
-        except FileNotFoundError as e:
-            raise VerificationFailureException(
-                "Missing .ansible-sign/sha256sum.txt checksums file in the collection to verify."
-            ) from e
-        certificate = data["sigstore_x509_certificate"]
-        signature = data["data"]
-        sigstore_bundle = data.get("sigstore_bundle")
-        if sigstore_signing_service.sigstore_bundle and not sigstore_bundle:
-            raise MissingSigstoreVerificationMaterialsException(
-                "Sigstore signing service for this repository requires "
-                "a Sigstore bundle to verify the collection signature."
+        except AttributeError as e:
+            log.error(
+                f"Error verifying sigstore signature for {collection}: "
+                f"Repository {repository} is not configured with a SigstoreVerifyingService."
             )
+            raise e
 
-        if not sigstore_bundle:
-            with tempfile.NamedTemporaryFile(dir=".", delete=False) as manifest_file:
-                manifest_file.write(sha256sumfile.read())
-            with open(manifest_file.name, mode="rb", buffering=0) as io:
-                verification_result = sigstore_signing_service.sigstore_verify(
-                    sha256sumfile=io,
-                    sha256sumcert=certificate.read().decode(),
-                    sha256sumsig=base64.b64encode(signature.read()),
-                    sigstore_bundle=None,
-                    entry=None,
-                )
-        else:
-            bundle = Bundle().from_json(sigstore_bundle)
-            with tempfile.NamedTemporaryFile(dir=".", delete=False) as manifest_file:
-                manifest_file.write(sha256sumfile.read())
-            with open(manifest_file.name, mode="rb", buffering=0) as io:
-                verification_result = sigstore_signing_service.sigstore_verify(
-                    sha256sumfile=io,
-                    sha256sumcert=None,
-                    sha256sumsig=None,
-                    sigstore_bundle=bundle,
-                    entry=None,
-                )
+    if isinstance(verification_result, VerificationFailure):
+        raise VerificationFailureException(
+            "Failed to verify Sigstore signature for collection "
+            f"{collection}: {verification_result.reason}"
+        )
 
-        if isinstance(verification_result, VerificationFailure):
-            raise VerificationFailureException(
-                "Failed to verify Sigstore signature for collection "
-                f"{collection}: {verification_result.reason}"
-            )
-
-        print(f"Validated Sigstore signature for collection {collection}")
+    print(f"Validated Sigstore signature for collection {collection}")
 
     data["data"] = signature
     data["sigstore_x509_certificate"] = certificate
@@ -176,41 +197,6 @@ class CollectionSigstoreSigningFirstStage(Stage):
     async def sigstore_sign_collection_versions(self, collection_versions):
         """Signs the collection versions with Sigstore."""
 
-        def _generate_checksum_manifest(collection_version):
-            cartifact = collection_version.contentartifact_set.select_related("artifact").first()
-            artifact_name = cartifact.artifact.file.name
-            artifact_file = storage.open(artifact_name)
-
-            with tempfile.TemporaryDirectory() as tempdir:
-                differ = DistlibManifestChecksumFileExistenceDiffer
-                checksum = ChecksumFile(tempdir, differ=differ)
-                with tarfile.open(fileobj=artifact_file, mode="r") as tar:
-                    tar.extractall(path=tempdir)
-
-                    try:
-                        manifest = checksum.generate_gnu_style()
-
-                    except FileNotFoundError as e:
-                        if os.path.islink(e.filename):
-                            log.error(f"Broken symlink found at {e.filename} -- this is not supported. Aborting.")
-                        if e.filename.endswith("/MANIFEST.in"):
-                            log.error("Could not find a MANIFEST.in file in the specified project.")
-                            log.info("If you are attempting to sign a project, please create this file.")
-                            log.info("See the ansible-sign documentation for more information.")
-                        raise e
-
-                    except DistlibException as e:
-                        log.error(f"An error was encountered while parsing MANIFEST.in: {e}")
-                        raise e
-
-                    for warning in checksum.warnings:
-                        log.warn(warning)
-                    log.debug(
-                        "Full calculated checksum manifest (%s):\n%s",
-                        manifest,
-                    )
-                    return manifest
-
         # Prepare ephemeral key pair and certificate and sign the collections asynchronously
         private_key = ec.generate_private_key(ec.SECP384R1())
         with open(self.sigstore_signing_service.credentials_file_path, "r") as credentials_file:
@@ -258,7 +244,8 @@ class CollectionSigstoreSigningFirstStage(Stage):
                 async with aiofiles.tempfile.NamedTemporaryFile(
                     dir=".", mode="w", delete=False
                 ) as manifest_file:
-                    manifest_data = await sync_to_async(_generate_checksum_manifest)(collection_version)                    
+                    cartifact = collection_version.contentartifact_set.select_related("artifact").first()
+                    manifest_data = await sync_to_async(_generate_checksum_manifest)(cartifact)                    
                     await manifest_file.write(manifest_data)
                 async with aiofiles.open(manifest_file.name, mode="rb", buffering=0) as iofile:
                     async with aiofiles.tempfile.NamedTemporaryFile(dir=".", mode="w", delete=False) as manifest_content:
